@@ -1,5 +1,6 @@
 use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
+use crate::nvme_future::NvmeFuture;
 use crate::pci::pci_map_resource;
 use crate::queues::*;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
@@ -497,11 +498,7 @@ impl NvmeDevice {
         Ok(())
     }
 
-    pub fn read_copied(
-        &mut self,
-        dest: &mut [u8],
-        mut lba: u64,
-    ) -> Result<(), Box<dyn Error>> {
+    pub fn read_copied(&mut self, dest: &mut [u8], mut lba: u64) -> Result<(), Box<dyn Error>> {
         let ns = *self.namespaces.get(&1).unwrap();
         for chunk in dest.chunks_mut(128 * 4096) {
             let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
@@ -510,6 +507,50 @@ impl NvmeDevice {
             chunk.copy_from_slice(&self.buffer[..chunk.len()]);
         }
         Ok(())
+    }
+
+    pub async fn write_async(&mut self, data: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
+        for chunk in data.chunks(2 * 4096) {
+            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
+            self.submit_async(1, blocks, lba, chunk.phys_addr as u64, true);
+            lba += blocks;
+        }
+
+        NvmeFuture::new(&mut self.io_cq, 1)
+    }
+
+    pub async fn read_async(&mut self, dest: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
+        for chunk in dest.chunks(2 * 4096) {
+            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
+            self.submit_async(1, blocks, lba, chunk.phys_addr as u64, false);
+            lba += blocks;
+        }
+
+        NvmeFuture::new(&mut self.io_cq, 1)
+    }
+
+    pub async fn write_copied_async(&mut self, data: &[u8], mut lba: u64) -> NvmeFuture {
+        let ns = *self.namespaces.get(&1).unwrap();
+        for chunk in data.chunks(128 * 4096) {
+            self.buffer[..chunk.len()].copy_from_slice(chunk);
+            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
+            self.submit_async(1, blocks, lba, self.buffer.phys as u64, true);
+            lba += blocks;
+        }
+
+        NvmeFuture::new(&mut self.io_cq, 1)
+    }
+
+    pub async fn read_copied_async(&mut self, dest: &mut [u8], mut lba: u64) -> NvmeFuture {
+        let ns = *self.namespaces.get(&1).unwrap();
+        for chunk in dest.chunks_mut(128 * 4096) {
+            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
+            self.submit_async(1, blocks, lba, self.buffer.phys as u64, false);
+            lba += blocks;
+            chunk.copy_from_slice(&self.buffer[..chunk.len()]);
+        }
+
+        NvmeFuture::new(&mut self.io_cq, 1)
     }
 
     fn submit_io(
@@ -706,6 +747,58 @@ impl NvmeDevice {
 
         self.write_reg_idx(NvmeArrayRegs::SQyTDBL, q_id as u16, tail as u32);
         self.io_sq.head = self.complete_io(1).unwrap() as usize;
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn submit_async(
+        &mut self,
+        ns_id: u32,
+        blocks: u64,
+        lba: u64,
+        addr: u64,
+        write: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        assert!(blocks > 0);
+        assert!(blocks <= 0x1_0000);
+
+        let q_id = 1;
+
+        let bytes = blocks * 512;
+        let ptr1 = if bytes <= 4096 {
+            0
+        } else if bytes <= 8192 {
+            // self.buffer.phys as u64 + 4096 // self.page_size
+            addr + 4096 // self.page_size
+        } else {
+            self.prp_list.phys as u64
+        };
+
+        let entry = if write {
+            NvmeCommand::io_write(
+                self.io_sq.tail as u16,
+                ns_id,
+                lba,
+                blocks as u16 - 1,
+                addr,
+                ptr1,
+            )
+        } else {
+            NvmeCommand::io_read(
+                self.io_sq.tail as u16,
+                ns_id,
+                lba,
+                blocks as u16 - 1,
+                addr,
+                ptr1,
+            )
+        };
+
+        let tail = self.io_sq.submit(entry);
+        self.stats.submissions += 1;
+
+        self.write_reg_idx(NvmeArrayRegs::SQyTDBL, q_id as u16, tail as u32);
+
         Ok(())
     }
 

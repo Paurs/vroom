@@ -6,6 +6,8 @@ pub mod memory;
 #[allow(dead_code)]
 mod nvme;
 #[allow(dead_code)]
+mod nvme_future;
+#[allow(dead_code)]
 mod pci;
 #[allow(dead_code)]
 mod queues;
