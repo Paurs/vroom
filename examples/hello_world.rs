@@ -14,7 +14,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let mut nvme = vroom::init(&pci_addr)?;
-    nvme.write_copied("hello world".as_bytes(), 0)?;
+    nvme.write_copied("hello world!".as_bytes(), 0)?;
 
     let mut dest = [0u8; 12];
     nvme.read_copied(&mut dest, 0)?;

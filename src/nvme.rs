@@ -509,48 +509,60 @@ impl NvmeDevice {
         Ok(())
     }
 
-    pub async fn write_async(&mut self, data: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
+    pub fn write_async(&mut self, data: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
+        let mut c_id = 0;
         for chunk in data.chunks(2 * 4096) {
             let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
-            self.submit_async(1, blocks, lba, chunk.phys_addr as u64, true);
+            c_id = self
+                .submit_async(1, blocks, lba, chunk.phys_addr as u64, true)
+                .unwrap();
             lba += blocks;
         }
 
-        NvmeFuture::new(&mut self.io_cq, 1)
+        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
     }
 
-    pub async fn read_async(&mut self, dest: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
+    pub fn read_async(&mut self, dest: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
+        let mut c_id = 0;
         for chunk in dest.chunks(2 * 4096) {
             let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
-            self.submit_async(1, blocks, lba, chunk.phys_addr as u64, false);
+            c_id = self
+                .submit_async(1, blocks, lba, chunk.phys_addr as u64, false)
+                .unwrap();
             lba += blocks;
         }
 
-        NvmeFuture::new(&mut self.io_cq, 1)
+        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
     }
 
-    pub async fn write_copied_async(&mut self, data: &[u8], mut lba: u64) -> NvmeFuture {
+    pub fn write_copied_async(&mut self, data: &[u8], mut lba: u64) -> NvmeFuture {
         let ns = *self.namespaces.get(&1).unwrap();
+        let mut c_id = 0;
         for chunk in data.chunks(128 * 4096) {
             self.buffer[..chunk.len()].copy_from_slice(chunk);
             let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
-            self.submit_async(1, blocks, lba, self.buffer.phys as u64, true);
+            c_id = self
+                .submit_async(1, blocks, lba, self.buffer.phys as u64, true)
+                .unwrap();
             lba += blocks;
         }
 
-        NvmeFuture::new(&mut self.io_cq, 1)
+        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
     }
 
-    pub async fn read_copied_async(&mut self, dest: &mut [u8], mut lba: u64) -> NvmeFuture {
+    pub fn read_copied_async(&mut self, dest: &mut [u8], mut lba: u64) -> NvmeFuture {
         let ns = *self.namespaces.get(&1).unwrap();
+        let mut c_id = 0;
         for chunk in dest.chunks_mut(128 * 4096) {
             let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
-            self.submit_async(1, blocks, lba, self.buffer.phys as u64, false);
+            c_id = self
+                .submit_async(1, blocks, lba, self.buffer.phys as u64, false)
+                .unwrap();
             lba += blocks;
             chunk.copy_from_slice(&self.buffer[..chunk.len()]);
         }
 
-        NvmeFuture::new(&mut self.io_cq, 1)
+        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
     }
 
     fn submit_io(
@@ -758,11 +770,13 @@ impl NvmeDevice {
         lba: u64,
         addr: u64,
         write: bool,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<u16, Box<dyn Error>> {
         assert!(blocks > 0);
         assert!(blocks <= 0x1_0000);
 
         let q_id = 1;
+
+        let c_id = self.io_sq.tail as u16;
 
         let bytes = blocks * 512;
         let ptr1 = if bytes <= 4096 {
@@ -775,23 +789,9 @@ impl NvmeDevice {
         };
 
         let entry = if write {
-            NvmeCommand::io_write(
-                self.io_sq.tail as u16,
-                ns_id,
-                lba,
-                blocks as u16 - 1,
-                addr,
-                ptr1,
-            )
+            NvmeCommand::io_write(c_id, ns_id, lba, blocks as u16 - 1, addr, ptr1)
         } else {
-            NvmeCommand::io_read(
-                self.io_sq.tail as u16,
-                ns_id,
-                lba,
-                blocks as u16 - 1,
-                addr,
-                ptr1,
-            )
+            NvmeCommand::io_read(c_id, ns_id, lba, blocks as u16 - 1, addr, ptr1)
         };
 
         let tail = self.io_sq.submit(entry);
@@ -799,7 +799,7 @@ impl NvmeDevice {
 
         self.write_reg_idx(NvmeArrayRegs::SQyTDBL, q_id as u16, tail as u32);
 
-        Ok(())
+        Ok(c_id)
     }
 
     fn submit_and_complete_admin<F: FnOnce(u16, usize) -> NvmeCommand>(

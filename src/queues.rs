@@ -138,6 +138,25 @@ impl NvmeCompQueue {
         }
     }
 
+    pub fn complete_async(&mut self) -> Option<NvmeCompletion> {
+        let entry = &self.commands[self.head];
+
+        if ((entry.status & 1) == 1) == self.phase {
+            Some(entry.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn new_head(&mut self) -> (usize, usize) {
+        let prev = self.head;
+        self.head = (self.head + 1) % self.len;
+        if self.head == 0 {
+            self.phase = !self.phase;
+        }
+        (self.head, prev)
+    }
+
     pub fn get_addr(&self) -> usize {
         self.commands.phys
     }
