@@ -322,6 +322,12 @@ impl NvmeDevice {
         })?;
         dev.q_id += 1;
 
+        let offset_sq = 0x1000 + ((4 << dev.dstrd) * (2 * dev.q_id) as usize);
+        let offset_cq = 0x1000 + ((4 << dev.dstrd) * (2 * dev.q_id + 1) as usize);
+
+        dev.io_sq.doorbell = dev.addr as usize + offset_sq;
+        dev.io_cq.doorbell = dev.addr as usize + offset_cq;
+
         Ok(dev)
     }
 
