@@ -3,28 +3,22 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+pub enum State {
+    Submitted,
+    Completed,
+}
+
 pub struct NvmeFuture<'a> {
     io_cq: &'a mut NvmeCompQueue,
     c_id: u16,
-    q_id: u16,
-    addr: *mut u8,
-    dstrd: u16,
+    head: usize,
 }
 
 impl<'a> NvmeFuture<'a> {
-    pub fn new(
-        io_cq: &'a mut NvmeCompQueue,
-        c_id: u16,
-        q_id: u16,
-        addr: *mut u8,
-        dstrd: u16,
-    ) -> Self {
-        Self {
-            io_cq,
-            c_id,
-            q_id,
-            addr,
-            dstrd,
+    pub fn new(io_cq: &'a mut NvmeCompQueue, c_id: u16) -> Self {
+        unsafe {
+            let head = std::ptr::read_unaligned(io_cq.doorbell as *mut u32) as usize;
+            Self { io_cq, c_id, head }
         }
     }
 }
@@ -50,5 +44,27 @@ impl Future for NvmeFuture<'_> {
                 Poll::Pending
             }
         }
+    }
+}
+
+pub struct Request {
+    c_id: u16,
+    state: State,
+}
+
+impl Request {
+    pub fn new(c_id: u16) -> Self {
+        Self {
+            c_id,
+            state: State::Submitted,
+        }
+    }
+}
+
+impl Future for Request {
+    type Output = (usize, NvmeCompletion, usize);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        todo!()
     }
 }

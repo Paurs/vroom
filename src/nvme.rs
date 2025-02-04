@@ -4,6 +4,7 @@ use crate::nvme_future::NvmeFuture;
 use crate::pci::pci_map_resource;
 use crate::queues::*;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
+use ::std::io;
 use std::collections::HashMap;
 use std::error::Error;
 use std::hint::spin_loop;
@@ -191,6 +192,48 @@ impl NvmeQueuePair {
             return Some(());
         }
         None
+    }
+
+    pub fn submit_async(
+        &mut self,
+        data: &impl DmaSlice,
+        mut lba: u64,
+        write: bool,
+    ) -> io::Result<()> {
+        // TODO: contruct PRP list?
+        let mut c_id = self.id << 11 | self.sub_queue.tail as u16;
+        for chunk in data.chunks(2 * 4096) {
+            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
+
+            let addr = chunk.phys_addr as u64;
+            let bytes = blocks * 512;
+            let ptr1 = if bytes <= 4096 {
+                0
+            } else {
+                addr + 4096 // self.page_size
+            };
+            c_id = self.id << 11 | self.sub_queue.tail as u16;
+            let entry = if write {
+                NvmeCommand::io_write(c_id, 1, lba, blocks as u16 - 1, addr, ptr1)
+            } else {
+                NvmeCommand::io_read(c_id, 1, lba, blocks as u16 - 1, addr, ptr1)
+            };
+
+            if let Some(tail) = self.sub_queue.submit_checked(entry) {
+                unsafe {
+                    std::ptr::write_volatile(self.sub_queue.doorbell as *mut u32, tail as u32);
+                }
+            } else {
+                eprintln!("queue full");
+            }
+
+            //NvmeFuture::new(&mut self.comp_queue, c_id);
+
+            lba += blocks;
+            println!("{lba}");
+        }
+
+        Ok(())
     }
 }
 
@@ -525,7 +568,7 @@ impl NvmeDevice {
             lba += blocks;
         }
 
-        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
+        NvmeFuture::new(&mut self.io_cq, c_id)
     }
 
     pub fn read_async(&mut self, dest: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
@@ -538,7 +581,7 @@ impl NvmeDevice {
             lba += blocks;
         }
 
-        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
+        NvmeFuture::new(&mut self.io_cq, c_id)
     }
 
     pub fn write_copied_async(&mut self, data: &[u8], mut lba: u64) -> NvmeFuture {
@@ -553,7 +596,7 @@ impl NvmeDevice {
             lba += blocks;
         }
 
-        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
+        NvmeFuture::new(&mut self.io_cq, c_id)
     }
 
     pub fn read_copied_async(&mut self, dest: &mut [u8], mut lba: u64) -> NvmeFuture {
@@ -568,7 +611,7 @@ impl NvmeDevice {
             chunk.copy_from_slice(&self.buffer[..chunk.len()]);
         }
 
-        NvmeFuture::new(&mut self.io_cq, c_id, self.q_id, self.addr, self.dstrd)
+        NvmeFuture::new(&mut self.io_cq, c_id)
     }
 
     fn submit_io(

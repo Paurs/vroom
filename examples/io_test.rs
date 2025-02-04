@@ -26,12 +26,12 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         None => None,
     };
 
-    let mut nvme = vroom::init(&pci_addr)?;
+    let mut driver = vroom::init(&pci_addr);
 
-    let nvme = qd_n(nvme, 1, 0, false, 128, duration)?;
-    let _ = qd_n(nvme, 1, 0, false, 256, duration)?;
+    //let nvme = qd_n(nvme, 1, 0, false, 128, duration)?;
+    //let _ = qd_n(nvme, 1, 0, false, 256, duration)?;
 
-    // let _ = qd1(nvme, 0, false, true, duration)?;
+    let _ = qd1(driver.nvme, 0, false, true, duration)?;
 
     Ok(())
 }

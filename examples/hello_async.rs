@@ -14,12 +14,14 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let mut nvme = vroom::init(&pci_addr)?;
-
-    nvme.write_copied_async("hello world!".as_bytes(), 0).await;
+    let mut driver = vroom::init(&pci_addr);
+    driver
+        .nvme
+        .write_copied_async("hello world!".as_bytes(), 0)
+        .await;
 
     let mut dest = [0u8; 12];
-    nvme.read_copied_async(&mut dest, 0).await;
+    driver.nvme.read_copied_async(&mut dest, 0).await;
 
     println!("{}", std::str::from_utf8(&dest)?);
 
