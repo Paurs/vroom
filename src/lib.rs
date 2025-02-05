@@ -4,6 +4,8 @@ mod cmd;
 #[allow(dead_code)]
 pub mod driver;
 #[allow(dead_code)]
+mod handle;
+#[allow(dead_code)]
 pub mod memory;
 #[allow(dead_code)]
 mod nvme;
