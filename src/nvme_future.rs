@@ -1,11 +1,16 @@
+use slab::Slab;
+
 use crate::queues::{NvmeCompQueue, NvmeCompletion};
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 pub enum State {
     Submitted,
-    Completed,
+    Waiting(Waker),
+    Completed(NvmeCompletion),
 }
 
 pub struct NvmeFuture<'a> {
@@ -48,23 +53,32 @@ impl Future for NvmeFuture<'_> {
 }
 
 pub struct Request {
-    c_id: u16,
-    state: State,
+    pub state: State,
 }
 
-impl Request {
-    pub fn new(c_id: u16) -> Self {
-        Self {
-            c_id,
-            state: State::Submitted,
+impl Future for Request {
+    type Output = NvmeCompletion;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.state {
+            State::Submitted => {
+                self.state = State::Waiting(cx.waker().clone());
+                Poll::Pending
+            }
+            State::Waiting(_) => {
+                self.state = State::Waiting(cx.waker().clone());
+                Poll::Pending
+            }
+            State::Completed(completion) => Poll::Ready(completion.clone()),
         }
     }
 }
 
-impl Future for Request {
-    type Output = (usize, NvmeCompletion, usize);
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        todo!()
+impl Drop for Request {
+    fn drop(&mut self) {
+        match self.state {
+            State::Completed(_) => {}
+            _ => panic!("Request dropped before completion."),
+        };
     }
 }
