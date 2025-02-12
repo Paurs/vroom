@@ -1,5 +1,3 @@
-use slab::Slab;
-
 use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
 use crate::nvme_future::Request;
@@ -8,11 +6,9 @@ use crate::pci::pci_map_resource;
 use crate::queues::*;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
 use ::std::io;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::hint::spin_loop;
-use std::rc::Rc;
 
 // clippy doesnt like this
 #[allow(unused, clippy::upper_case_acronyms)]
@@ -103,7 +99,6 @@ pub struct NvmeQueuePair {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
-    pub slab: Rc<RefCell<Slab<State>>>,
     requests: Vec<Request>,
 }
 
@@ -490,7 +485,6 @@ impl NvmeDevice {
             id: q_id,
             sub_queue,
             comp_queue,
-            slab: Rc::new(RefCell::new(Slab::new())),
             requests: Vec::new(),
         })
     }

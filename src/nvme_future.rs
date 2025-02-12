@@ -1,10 +1,6 @@
-use slab::Slab;
-
 use crate::queues::{NvmeCompQueue, NvmeCompletion};
-use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 pub enum State {
@@ -60,6 +56,8 @@ impl Future for Request {
     type Output = NvmeCompletion;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        println!("polling... ");
+
         match self.state {
             State::Submitted => {
                 self.state = State::Waiting(cx.waker().clone());

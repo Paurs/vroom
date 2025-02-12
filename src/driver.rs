@@ -1,4 +1,9 @@
-use std::{cell::RefCell, error::Error, rc::Rc};
+use std::{
+    cell::RefCell,
+    error::Error,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     nvme_future::{Request, State},
@@ -8,7 +13,7 @@ use crate::{
 
 pub struct Driver {
     pub nvme: Rc<RefCell<NvmeDevice>>,
-    pub requests: Vec<Request>,
+    pub states: Arc<Mutex<Vec<State>>>,
 }
 
 impl Driver {
@@ -37,7 +42,7 @@ impl Driver {
 
         Ok(Driver {
             nvme: Rc::new(RefCell::new(nvme)),
-            requests: Vec::new(),
+            states: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -47,17 +52,15 @@ impl Driver {
         }
     }
 
-    pub fn write_copied(&mut self, data: &[u8], lba: u64) {
-        let req = self.nvme.borrow_mut().write_copied_test(data, lba);
-        self.requests.push(req);
+    pub fn write_copied(&mut self, data: &[u8], lba: u64) -> Request {
+        self.nvme.borrow_mut().write_copied_test(data, lba)
     }
 
-    pub fn read_copied(&mut self, dest: &mut [u8], lba: u64) {
-        let req = self.nvme.borrow_mut().read_copied_test(dest, lba);
-        self.requests.push(req);
+    pub fn read_copied(&mut self, dest: &mut [u8], lba: u64) -> Request {
+        self.nvme.borrow_mut().read_copied_test(dest, lba)
     }
 
-    fn poll_queue(&mut self, q_id: usize) {
+    pub fn poll_queue(&mut self, q_id: usize) {
         if q_id == 1 {
             while let Some((tail, c_entry, _)) = self.nvme.borrow_mut().complete() {
                 unsafe {
@@ -77,11 +80,20 @@ impl Driver {
                     );
                     eprintln!("{:?}", c_entry);
                 }
-                let mut req = self.requests.remove(c_entry.c_id as usize);
-                match req.state {
-                    State::Submitted => req.state = State::Completed(c_entry),
-                    State::Waiting(_) => req.state = State::Completed(c_entry),
-                    State::Completed(_) => println!("Request allready completed."),
+
+                let states_clone = self.states.clone();
+                let mut states = states_clone.lock().unwrap();
+
+                if let Some(state) = states.get(c_entry.c_id as usize) {
+                    match state {
+                        State::Submitted => {
+                            states[c_entry.c_id as usize] = State::Completed(c_entry)
+                        }
+                        State::Waiting(_) => {
+                            states[c_entry.c_id as usize] = State::Completed(c_entry)
+                        }
+                        State::Completed(_) => println!("Request allready completed."),
+                    }
                 }
             }
         } else {
