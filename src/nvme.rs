@@ -1,13 +1,18 @@
+use slab::Slab;
+
 use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
-use crate::nvme_future::NvmeFuture;
+use crate::nvme_future::Request;
+use crate::nvme_future::{NvmeFuture, State};
 use crate::pci::pci_map_resource;
 use crate::queues::*;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
 use ::std::io;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::hint::spin_loop;
+use std::rc::Rc;
 
 // clippy doesnt like this
 #[allow(unused, clippy::upper_case_acronyms)]
@@ -98,6 +103,8 @@ pub struct NvmeQueuePair {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
+    pub slab: Rc<RefCell<Slab<State>>>,
+    requests: Vec<Request>,
 }
 
 impl NvmeQueuePair {
@@ -201,7 +208,6 @@ impl NvmeQueuePair {
         write: bool,
     ) -> io::Result<()> {
         // TODO: contruct PRP list?
-        let mut c_id = self.id << 11 | self.sub_queue.tail as u16;
         for chunk in data.chunks(2 * 4096) {
             let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
 
@@ -212,7 +218,7 @@ impl NvmeQueuePair {
             } else {
                 addr + 4096 // self.page_size
             };
-            c_id = self.id << 11 | self.sub_queue.tail as u16;
+            let c_id = self.id << 11 | self.sub_queue.tail as u16;
             let entry = if write {
                 NvmeCommand::io_write(c_id, 1, lba, blocks as u16 - 1, addr, ptr1)
             } else {
@@ -227,13 +233,45 @@ impl NvmeQueuePair {
                 eprintln!("queue full");
             }
 
-            //NvmeFuture::new(&mut self.comp_queue, c_id);
+            let req = Request {
+                state: State::Submitted,
+            };
+
+            self.requests.push(req);
 
             lba += blocks;
             println!("{lba}");
         }
 
         Ok(())
+    }
+
+    pub fn poll(&mut self) {
+        // check completion queue for completed requests
+        // set state of coresponding request Future to Completed
+        // for uncompleted requests set Future state to Waiting
+
+        // take completion at head from completion queue
+        // set request Future to completed and remove it from vec
+        if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
+            unsafe {
+                std::ptr::write_volatile(self.comp_queue.doorbell as *mut u32, tail as u32);
+            }
+            self.sub_queue.head = c_entry.sq_head as usize;
+            let status = c_entry.status >> 1;
+            if status != 0 {
+                eprintln!(
+                    "Status: 0x{:x}, Status Code 0x{:x}, Status Code Type: 0x{:x}",
+                    status,
+                    status & 0xFF,
+                    (status >> 8) & 0x7
+                );
+                eprintln!("{:?}", c_entry);
+            }
+
+            let mut req = self.requests.remove(c_entry.c_id as usize);
+            req.state = State::Completed(c_entry);
+        }
     }
 }
 
@@ -452,6 +490,8 @@ impl NvmeDevice {
             id: q_id,
             sub_queue,
             comp_queue,
+            slab: Rc::new(RefCell::new(Slab::new())),
+            requests: Vec::new(),
         })
     }
 
@@ -612,6 +652,52 @@ impl NvmeDevice {
         }
 
         NvmeFuture::new(&mut self.io_cq, c_id)
+    }
+
+    pub fn write_copied_test(&mut self, data: &[u8], mut lba: u64) -> Request {
+        let ns = *self.namespaces.get(&1).unwrap();
+        let mut c_id = 0;
+        for chunk in data.chunks(128 * 4096) {
+            self.buffer[..chunk.len()].copy_from_slice(chunk);
+            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
+            c_id = self
+                .submit_async(1, blocks, lba, self.buffer.phys as u64, true)
+                .unwrap();
+            lba += blocks;
+        }
+
+        Request {
+            state: State::Submitted,
+        }
+    }
+
+    pub fn read_copied_test(&mut self, dest: &mut [u8], mut lba: u64) -> Request {
+        let ns = *self.namespaces.get(&1).unwrap();
+        let mut c_id = 0;
+        for chunk in dest.chunks_mut(128 * 4096) {
+            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
+            c_id = self
+                .submit_async(1, blocks, lba, self.buffer.phys as u64, false)
+                .unwrap();
+            lba += blocks;
+            chunk.copy_from_slice(&self.buffer[..chunk.len()]);
+        }
+
+        Request {
+            state: State::Submitted,
+        }
+    }
+
+    pub fn complete(&mut self) -> Option<(usize, NvmeCompletion, usize)> {
+        self.io_cq.complete()
+    }
+
+    pub fn get_c_doorbell(&self) -> usize {
+        self.io_cq.doorbell
+    }
+
+    pub fn set_sq_head(&mut self, head: usize) {
+        self.io_sq.head = head;
     }
 
     fn submit_io(

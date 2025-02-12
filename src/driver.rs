@@ -1,10 +1,14 @@
-use std::{error::Error, io, task::Poll};
+use std::{cell::RefCell, error::Error, rc::Rc};
 
-use crate::{memory::DmaSlice, nvme_future::Request, pci::*, queues::NvmeCompletion, NvmeDevice};
+use crate::{
+    nvme_future::{Request, State},
+    pci::*,
+    NvmeDevice,
+};
 
 pub struct Driver {
-    pub nvme: NvmeDevice,
-    requests: Vec<Request>,
+    pub nvme: Rc<RefCell<NvmeDevice>>,
+    pub requests: Vec<Request>,
 }
 
 impl Driver {
@@ -32,18 +36,57 @@ impl Driver {
         }
 
         Ok(Driver {
-            nvme: nvme,
+            nvme: Rc::new(RefCell::new(nvme)),
             requests: Vec::new(),
         })
     }
 
-    pub fn poll_op(&self, c_id: usize) -> Poll<NvmeCompletion> {
-        let request = self.requests.get(c_id);
-
-        todo!()
+    pub async fn listen(&mut self) {
+        loop {
+            self.poll_queue(1);
+        }
     }
 
-    pub fn submit_io(&mut self, data: &impl DmaSlice, mut lba: u64, write: bool) -> io::Result<()> {
-        todo!()
+    pub fn write_copied(&mut self, data: &[u8], lba: u64) {
+        let req = self.nvme.borrow_mut().write_copied_test(data, lba);
+        self.requests.push(req);
+    }
+
+    pub fn read_copied(&mut self, dest: &mut [u8], lba: u64) {
+        let req = self.nvme.borrow_mut().read_copied_test(dest, lba);
+        self.requests.push(req);
+    }
+
+    fn poll_queue(&mut self, q_id: usize) {
+        if q_id == 1 {
+            while let Some((tail, c_entry, _)) = self.nvme.borrow_mut().complete() {
+                unsafe {
+                    std::ptr::write_volatile(
+                        self.nvme.borrow().get_c_doorbell() as *mut u32,
+                        tail as u32,
+                    );
+                }
+                self.nvme.borrow_mut().set_sq_head(c_entry.sq_head as usize);
+                let status = c_entry.status >> 1;
+                if status != 0 {
+                    eprintln!(
+                        "Status: 0x{:x}, Status Code 0x{:x}, Status Code Type: 0x{:x}",
+                        status,
+                        status & 0xFF,
+                        (status >> 8) & 0x7
+                    );
+                    eprintln!("{:?}", c_entry);
+                }
+                let mut req = self.requests.remove(c_entry.c_id as usize);
+                match req.state {
+                    State::Submitted => req.state = State::Completed(c_entry),
+                    State::Waiting(_) => req.state = State::Completed(c_entry),
+                    State::Completed(_) => println!("Request allready completed."),
+                }
+            }
+        } else {
+            // handle multiple queue pairs
+            todo!()
+        }
     }
 }
