@@ -5,11 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{
-    nvme_future::{Request, State},
-    pci::*,
-    NvmeDevice,
-};
+use crate::{nvme_future::State, pci::*, NvmeDevice};
 
 pub struct Driver {
     pub nvme: Rc<RefCell<NvmeDevice>>,
@@ -50,14 +46,6 @@ impl Driver {
         loop {
             self.poll_queue(1);
         }
-    }
-
-    pub fn write_copied(&mut self, data: &[u8], lba: u64) -> Request {
-        self.nvme.borrow_mut().write_copied_test(data, lba)
-    }
-
-    pub fn read_copied(&mut self, dest: &mut [u8], lba: u64) -> Request {
-        self.nvme.borrow_mut().read_copied_test(dest, lba)
     }
 
     pub fn poll_queue(&mut self, q_id: usize) {

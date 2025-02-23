@@ -5,11 +5,11 @@ use std::slice;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{self, Read, Seek};
+use std::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFull, RangeTo};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::{fs, mem, process, ptr};
-use std::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeTo, RangeFull};
 
 // from https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt
 const X86_VA_WIDTH: u8 = 47;
@@ -39,17 +39,13 @@ impl<T> Deref for Dma<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            &*self.virt
-        }
+        unsafe { &*self.virt }
     }
 }
 
 impl<T> DerefMut for Dma<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            &mut *self.virt
-        }
+        unsafe { &mut *self.virt }
     }
 }
 
@@ -77,7 +73,10 @@ impl<'a, T> Iterator for DmaChunks<'a, T> {
         } else {
             let chunk_phys_addr = self.dma.phys + self.current_offset * std::mem::size_of::<T>();
             let offset_ptr = unsafe { self.dma.virt.add(self.current_offset) };
-            let len = std::cmp::min(self.chunk_size, (self.dma.size - self.current_offset) / std::mem::size_of::<T>());
+            let len = std::cmp::min(
+                self.chunk_size,
+                (self.dma.size - self.current_offset) / std::mem::size_of::<T>(),
+            );
 
             self.current_offset += len;
 
@@ -112,10 +111,9 @@ impl DmaSlice for Dma<u8> {
             Dma {
                 virt: self.virt.add(index.start),
                 phys: self.phys + index.start,
-                size: (index.end - index.start)
+                size: (index.end - index.start),
             }
         }
-
     }
 }
 
@@ -125,18 +123,14 @@ impl Index<Range<usize>> for Dma<u8> {
     fn index(&self, index: Range<usize>) -> &Self::Output {
         assert!(index.end <= self.size, "Index out of bounds");
 
-        unsafe {
-            slice::from_raw_parts(self.virt.add(index.start), index.end - index.start)
-        }
+        unsafe { slice::from_raw_parts(self.virt.add(index.start), index.end - index.start) }
     }
 }
 
 impl IndexMut<Range<usize>> for Dma<u8> {
     fn index_mut(&mut self, index: Range<usize>) -> &mut Self::Output {
         assert!(index.end <= self.size, "Index out of bounds");
-        unsafe {
-            slice::from_raw_parts_mut(self.virt.add(index.start), index.end - index.start)
-        }
+        unsafe { slice::from_raw_parts_mut(self.virt.add(index.start), index.end - index.start) }
     }
 }
 
@@ -166,7 +160,6 @@ impl IndexMut<RangeFull> for Dma<u8> {
     fn index_mut(&mut self, _: RangeFull) -> &mut Self::Output {
         let len = self.size;
         &mut self[0..len]
-
     }
 }
 
@@ -208,7 +201,7 @@ impl<T> Dma<T> {
                         // virt: NonNull::new(ptr as *mut T).expect("oops"),
                         virt: ptr as *mut T,
                         phys: virt_to_phys(ptr as usize)?,
-                        size
+                        size,
                     };
                     Ok(memory)
                 } else {
@@ -246,7 +239,7 @@ pub(crate) fn virt_to_phys(addr: usize) -> Result<usize, Box<dyn Error>> {
     Ok((phys & 0x007F_FFFF_FFFF_FFFF) * pagesize + addr % pagesize)
 }
 
-#[allow(unused)]
+#[allow(unused, static_mut_refs)]
 pub fn vfio_enabled() -> bool {
     unsafe { VFIO_CONTAINER_FILE_DESCRIPTOR.is_some() }
 }

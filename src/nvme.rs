@@ -1,7 +1,7 @@
 use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
 use crate::nvme_future::Request;
-use crate::nvme_future::{NvmeFuture, State};
+use crate::nvme_future::State;
 use crate::pci::pci_map_resource;
 use crate::queues::*;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
@@ -100,6 +100,7 @@ pub struct NvmeQueuePair {
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
     requests: Vec<Request>,
+    pub active: bool,
 }
 
 impl NvmeQueuePair {
@@ -267,6 +268,18 @@ impl NvmeQueuePair {
             let mut req = self.requests.remove(c_entry.c_id as usize);
             req.state = State::Completed(c_entry);
         }
+    }
+
+    pub async fn listen(&mut self) {
+        while self.active {
+            self.poll();
+        }
+    }
+}
+
+impl Drop for NvmeQueuePair {
+    fn drop(&mut self) {
+        self.active = false;
     }
 }
 
@@ -486,6 +499,7 @@ impl NvmeDevice {
             sub_queue,
             comp_queue,
             requests: Vec::new(),
+            active: true,
         })
     }
 
@@ -590,96 +604,6 @@ impl NvmeDevice {
             chunk.copy_from_slice(&self.buffer[..chunk.len()]);
         }
         Ok(())
-    }
-
-    pub fn write_async(&mut self, data: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
-        let mut c_id = 0;
-        for chunk in data.chunks(2 * 4096) {
-            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
-            c_id = self
-                .submit_async(1, blocks, lba, chunk.phys_addr as u64, true)
-                .unwrap();
-            lba += blocks;
-        }
-
-        NvmeFuture::new(&mut self.io_cq, c_id)
-    }
-
-    pub fn read_async(&mut self, dest: &impl DmaSlice, mut lba: u64) -> NvmeFuture {
-        let mut c_id = 0;
-        for chunk in dest.chunks(2 * 4096) {
-            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
-            c_id = self
-                .submit_async(1, blocks, lba, chunk.phys_addr as u64, false)
-                .unwrap();
-            lba += blocks;
-        }
-
-        NvmeFuture::new(&mut self.io_cq, c_id)
-    }
-
-    pub fn write_copied_async(&mut self, data: &[u8], mut lba: u64) -> NvmeFuture {
-        let ns = *self.namespaces.get(&1).unwrap();
-        let mut c_id = 0;
-        for chunk in data.chunks(128 * 4096) {
-            self.buffer[..chunk.len()].copy_from_slice(chunk);
-            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
-            c_id = self
-                .submit_async(1, blocks, lba, self.buffer.phys as u64, true)
-                .unwrap();
-            lba += blocks;
-        }
-
-        NvmeFuture::new(&mut self.io_cq, c_id)
-    }
-
-    pub fn read_copied_async(&mut self, dest: &mut [u8], mut lba: u64) -> NvmeFuture {
-        let ns = *self.namespaces.get(&1).unwrap();
-        let mut c_id = 0;
-        for chunk in dest.chunks_mut(128 * 4096) {
-            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
-            c_id = self
-                .submit_async(1, blocks, lba, self.buffer.phys as u64, false)
-                .unwrap();
-            lba += blocks;
-            chunk.copy_from_slice(&self.buffer[..chunk.len()]);
-        }
-
-        NvmeFuture::new(&mut self.io_cq, c_id)
-    }
-
-    pub fn write_copied_test(&mut self, data: &[u8], mut lba: u64) -> Request {
-        let ns = *self.namespaces.get(&1).unwrap();
-        let mut c_id = 0;
-        for chunk in data.chunks(128 * 4096) {
-            self.buffer[..chunk.len()].copy_from_slice(chunk);
-            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
-            c_id = self
-                .submit_async(1, blocks, lba, self.buffer.phys as u64, true)
-                .unwrap();
-            lba += blocks;
-        }
-
-        Request {
-            state: State::Submitted,
-        }
-    }
-
-    pub fn read_copied_test(&mut self, dest: &mut [u8], mut lba: u64) -> Request {
-        let ns = *self.namespaces.get(&1).unwrap();
-        let mut c_id = 0;
-        for chunk in dest.chunks_mut(128 * 4096) {
-            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
-            c_id = self
-                .submit_async(1, blocks, lba, self.buffer.phys as u64, false)
-                .unwrap();
-            lba += blocks;
-            chunk.copy_from_slice(&self.buffer[..chunk.len()]);
-        }
-
-        Request {
-            state: State::Submitted,
-        }
     }
 
     pub fn complete(&mut self) -> Option<(usize, NvmeCompletion, usize)> {
@@ -889,46 +813,6 @@ impl NvmeDevice {
         self.write_reg_idx(NvmeArrayRegs::SQyTDBL, q_id as u16, tail as u32);
         self.io_sq.head = self.complete_io(1).unwrap() as usize;
         Ok(())
-    }
-
-    #[inline(always)]
-    fn submit_async(
-        &mut self,
-        ns_id: u32,
-        blocks: u64,
-        lba: u64,
-        addr: u64,
-        write: bool,
-    ) -> Result<u16, Box<dyn Error>> {
-        assert!(blocks > 0);
-        assert!(blocks <= 0x1_0000);
-
-        let q_id = 1;
-
-        let c_id = self.io_sq.tail as u16;
-
-        let bytes = blocks * 512;
-        let ptr1 = if bytes <= 4096 {
-            0
-        } else if bytes <= 8192 {
-            // self.buffer.phys as u64 + 4096 // self.page_size
-            addr + 4096 // self.page_size
-        } else {
-            self.prp_list.phys as u64
-        };
-
-        let entry = if write {
-            NvmeCommand::io_write(c_id, ns_id, lba, blocks as u16 - 1, addr, ptr1)
-        } else {
-            NvmeCommand::io_read(c_id, ns_id, lba, blocks as u16 - 1, addr, ptr1)
-        };
-
-        let tail = self.io_sq.submit(entry);
-        self.stats.submissions += 1;
-
-        self.write_reg_idx(NvmeArrayRegs::SQyTDBL, q_id as u16, tail as u32);
-
-        Ok(c_id)
     }
 
     fn submit_and_complete_admin<F: FnOnce(u16, usize) -> NvmeCommand>(
