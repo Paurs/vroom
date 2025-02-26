@@ -1,19 +1,14 @@
-use std::{
-    cell::RefCell,
-    error::Error,
-    rc::Rc,
-    sync::{Arc, Mutex},
-};
+use std::error::Error;
 
-use crate::{nvme_future::State, pci::*, NvmeDevice};
+use crate::{pci::*, NvmeDevice, NvmeQueuePair, QUEUE_LENGTH};
 
 pub struct Driver {
-    pub nvme: Rc<RefCell<NvmeDevice>>,
-    pub states: Arc<Mutex<Vec<State>>>,
+    pub nvme: NvmeDevice,
+    pub pairs: Vec<NvmeQueuePair>,
 }
 
 impl Driver {
-    pub fn new(pci_addr: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn new(pci_addr: &str, queue_num: usize) -> Result<Self, Box<dyn Error>> {
         let mut vendor_file = pci_open_resource_ro(pci_addr, "vendor").expect("wrong pci address");
         let mut device_file = pci_open_resource_ro(pci_addr, "device").expect("wrong pci address");
         let mut config_file = pci_open_resource_ro(pci_addr, "config").expect("wrong pci address");
@@ -36,57 +31,39 @@ impl Driver {
             nvme.identify_namespace(n);
         }
 
+        let mut pairs = Vec::new();
+        for _ in 0..queue_num {
+            let qp = nvme.create_io_queue_pair(QUEUE_LENGTH)?;
+            pairs.push(qp);
+        }
+
         Ok(Driver {
-            nvme: Rc::new(RefCell::new(nvme)),
-            states: Arc::new(Mutex::new(Vec::new())),
+            nvme: nvme,
+            pairs: pairs,
         })
     }
 
     pub async fn listen(&mut self) {
         loop {
-            self.poll_queue(1);
+            self.poll_queue(1).await;
         }
     }
 
-    pub fn poll_queue(&mut self, q_id: usize) {
-        if q_id == 1 {
-            while let Some((tail, c_entry, _)) = self.nvme.borrow_mut().complete() {
-                unsafe {
-                    std::ptr::write_volatile(
-                        self.nvme.borrow().get_c_doorbell() as *mut u32,
-                        tail as u32,
-                    );
-                }
-                self.nvme.borrow_mut().set_sq_head(c_entry.sq_head as usize);
-                let status = c_entry.status >> 1;
-                if status != 0 {
-                    eprintln!(
-                        "Status: 0x{:x}, Status Code 0x{:x}, Status Code Type: 0x{:x}",
-                        status,
-                        status & 0xFF,
-                        (status >> 8) & 0x7
-                    );
-                    eprintln!("{:?}", c_entry);
-                }
-
-                let states_clone = self.states.clone();
-                let mut states = states_clone.lock().unwrap();
-
-                if let Some(state) = states.get(c_entry.c_id as usize) {
-                    match state {
-                        State::Submitted => {
-                            states[c_entry.c_id as usize] = State::Completed(c_entry)
-                        }
-                        State::Waiting(_) => {
-                            states[c_entry.c_id as usize] = State::Completed(c_entry)
-                        }
-                        State::Completed(_) => println!("Request allready completed."),
-                    }
-                }
-            }
+    pub async fn poll_queue(&mut self, q_id: u16) {
+        if let Some(pair) = self
+            .pairs
+            .iter_mut()
+            .find(|&&mut NvmeQueuePair { id, .. }| id == q_id)
+        {
+            pair.poll().await;
         } else {
-            // handle multiple queue pairs
-            todo!()
+            println!("not found");
+        }
+    }
+
+    pub async fn poll(&mut self) {
+        for p in self.pairs.iter_mut() {
+            p.poll().await;
         }
     }
 }
