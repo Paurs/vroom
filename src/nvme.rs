@@ -203,7 +203,6 @@ impl NvmeQueuePair {
         mut lba: u64,
         write: bool,
     ) -> io::Result<()> {
-        // TODO: contruct PRP list?
         for chunk in data.chunks(2 * 4096) {
             let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
 
@@ -237,19 +236,19 @@ impl NvmeQueuePair {
             self.requests.push(req);
 
             lba += blocks;
-            println!("{lba}");
         }
 
         Ok(())
     }
 
-    pub fn poll(&mut self) {
+    pub async fn poll(&mut self) {
         // check completion queue for completed requests
         // set state of coresponding request Future to Completed
         // for uncompleted requests set Future state to Waiting
 
         // take completion at head from completion queue
         // set request Future to completed and remove it from vec
+        println!("Polling...");
         if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
             unsafe {
                 std::ptr::write_volatile(self.comp_queue.doorbell as *mut u32, tail as u32);
@@ -266,14 +265,20 @@ impl NvmeQueuePair {
                 eprintln!("{:?}", c_entry);
             }
 
-            let mut req = self.requests.remove(c_entry.c_id as usize);
+            let req = self
+                .requests
+                .iter_mut()
+                .find(|req| req.c_id == c_entry.c_id)
+                .unwrap();
+
             req.state = State::Completed(c_entry);
+            req.await;
         }
     }
 
     pub async fn listen(&mut self) {
-        while self.active {
-            self.poll();
+        loop {
+            self.poll().await;
         }
     }
 }
