@@ -11,14 +11,14 @@ pub enum State {
 
 pub struct Request {
     pub state: State,
+    pub c_id: u16,
 }
 
 impl Future for Request {
     type Output = NvmeCompletion;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        println!("polling... ");
-
+        cx.waker().wake_by_ref();
         match self.state {
             State::Submitted => {
                 self.state = State::Waiting(cx.waker().clone());

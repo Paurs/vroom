@@ -231,6 +231,7 @@ impl NvmeQueuePair {
 
             let req = Request {
                 state: State::Submitted,
+                c_id: c_id,
             };
 
             self.requests.push(req);
