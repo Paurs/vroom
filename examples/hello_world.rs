@@ -13,7 +13,7 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let mut driver = vroom::init(&pci_addr, 1);
+    let mut driver = vroom::init(&pci_addr)?;
 
     driver.nvme.write_copied("hello world!".as_bytes(), 0)?;
 

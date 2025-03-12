@@ -97,7 +97,6 @@ pub struct NvmeQueuePair {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
-    pub active: bool,
 }
 
 impl NvmeQueuePair {
@@ -296,12 +295,6 @@ impl NvmeQueuePair {
                 }
             }
         }
-    }
-}
-
-impl Drop for NvmeQueuePair {
-    fn drop(&mut self) {
-        self.active = false;
     }
 }
 
@@ -520,7 +513,6 @@ impl NvmeDevice {
             id: q_id,
             sub_queue,
             comp_queue,
-            active: false,
         })
     }
 

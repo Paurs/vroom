@@ -4,8 +4,6 @@ mod cmd;
 #[allow(dead_code)]
 pub mod driver;
 #[allow(dead_code)]
-mod handle;
-#[allow(dead_code)]
 pub mod memory;
 #[allow(dead_code)]
 mod nvme;
@@ -20,9 +18,10 @@ use driver::Driver;
 pub use memory::HUGE_PAGE_SIZE;
 pub use nvme::{NvmeDevice, NvmeQueuePair};
 pub use queues::QUEUE_LENGTH;
+use std::error::Error;
 
-pub fn init(pci_addr: &str) -> Driver {
-    Driver::new(pci_addr).unwrap()
+pub fn init(pci_addr: &str) -> Result<Driver, Box<dyn Error>> {
+    Driver::new(pci_addr)
 }
 
 #[derive(Debug, Clone, Copy)]
