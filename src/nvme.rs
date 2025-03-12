@@ -1,11 +1,9 @@
 use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
 use crate::nvme_future::Request;
-use crate::nvme_future::State;
 use crate::pci::pci_map_resource;
 use crate::queues::*;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
-use ::std::io;
 use std::collections::HashMap;
 use std::error::Error;
 use std::hint::spin_loop;
@@ -99,7 +97,6 @@ pub struct NvmeQueuePair {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
-    requests: Vec<Request>,
     pub active: bool,
 }
 
@@ -202,7 +199,9 @@ impl NvmeQueuePair {
         data: &impl DmaSlice,
         mut lba: u64,
         write: bool,
-    ) -> io::Result<()> {
+    ) -> Vec<Request> {
+        let mut requests: Vec<Request> = Vec::new();
+
         for chunk in data.chunks(2 * 4096) {
             let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
 
@@ -228,17 +227,13 @@ impl NvmeQueuePair {
                 eprintln!("queue full");
             }
 
-            let req = Request {
-                state: State::Submitted,
-                c_id: c_id,
-            };
-
-            self.requests.push(req);
-
             lba += blocks;
+
+            let req = Request::new(c_id);
+            requests.push(req);
         }
 
-        Ok(())
+        requests
     }
 
     pub async fn poll(&mut self) {
