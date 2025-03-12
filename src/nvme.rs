@@ -1,5 +1,5 @@
 use crate::cmd::NvmeCommand;
-use crate::memory::{Dma, DmaSlice};
+use crate::memory::{Dma, DmaChunk, DmaSlice};
 use crate::nvme_future::Request;
 use crate::pci::pci_map_resource;
 use crate::queues::*;
@@ -236,14 +236,38 @@ impl NvmeQueuePair {
         requests
     }
 
-    pub async fn poll(&mut self) {
-        // check completion queue for completed requests
-        // set state of coresponding request Future to Completed
-        // for uncompleted requests set Future state to Waiting
+    pub fn submit_chunck(&mut self, chunk: DmaChunk<'_, u8>, write: bool, lba: u64) -> Request {
+        let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
 
+        let addr = chunk.phys_addr as u64;
+        let bytes = blocks * 512;
+        let ptr1 = if bytes <= 4096 {
+            0
+        } else {
+            addr + 4096 // self.page_size
+        };
+        let c_id = self.id << 11 | self.sub_queue.tail as u16;
+        let entry = if write {
+            NvmeCommand::io_write(c_id, 1, lba, blocks as u16 - 1, addr, ptr1)
+        } else {
+            NvmeCommand::io_read(c_id, 1, lba, blocks as u16 - 1, addr, ptr1)
+        };
+
+        if let Some(tail) = self.sub_queue.submit_checked(entry) {
+            unsafe {
+                std::ptr::write_volatile(self.sub_queue.doorbell as *mut u32, tail as u32);
+            }
+        } else {
+            eprintln!("queue full");
+        }
+
+        Request::new(c_id)
+    }
+
+    pub fn poll(&mut self) -> Option<NvmeCompletion> {
+        println!("Polling...");
         // take completion at head from completion queue
         // set request Future to completed and remove it from vec
-        println!("Polling...");
         if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
             unsafe {
                 std::ptr::write_volatile(self.comp_queue.doorbell as *mut u32, tail as u32);
@@ -259,21 +283,18 @@ impl NvmeQueuePair {
                 );
                 eprintln!("{:?}", c_entry);
             }
-
-            let req = self
-                .requests
-                .iter_mut()
-                .find(|req| req.c_id == c_entry.c_id)
-                .unwrap();
-
-            req.state = State::Completed(c_entry);
-            req.await;
+            return Some(c_entry);
         }
+        None
     }
 
-    pub async fn listen(&mut self) {
+    pub async fn poll_queue(&mut self, mut request: Request) {
         loop {
-            self.poll().await;
+            if let Some(c_entry) = self.poll() {
+                if c_entry.c_id == request.c_id {
+                    request.complete(c_entry);
+                }
+            }
         }
     }
 }
@@ -499,8 +520,7 @@ impl NvmeDevice {
             id: q_id,
             sub_queue,
             comp_queue,
-            requests: Vec::new(),
-            active: true,
+            active: false,
         })
     }
 
