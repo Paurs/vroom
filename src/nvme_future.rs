@@ -24,14 +24,16 @@ pub struct Request {
     pub state: State,
     waker: Option<Waker>,
     pub c_id: u16,
+    pub r_id: usize,
 }
 
 impl Request {
-    pub fn new(c_id: u16) -> Self {
+    pub fn new(c_id: u16, r_id: usize) -> Self {
         Request {
             state: State::Submitted,
             waker: None,
             c_id,
+            r_id,
         }
     }
 

@@ -20,8 +20,8 @@ pub use nvme::{NvmeDevice, NvmeQueuePair};
 pub use queues::QUEUE_LENGTH;
 use std::error::Error;
 
-pub fn init(pci_addr: &str) -> Result<Driver, Box<dyn Error>> {
-    Driver::new(pci_addr)
+pub fn init(pci_addr: &str) -> Result<(), Box<dyn Error>> {
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

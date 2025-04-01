@@ -36,6 +36,9 @@ pub struct NvmeSubQueue {
     pub doorbell: usize,
 }
 
+unsafe impl Send for NvmeSubQueue {}
+unsafe impl Sync for NvmeSubQueue {}
+
 impl NvmeSubQueue {
     pub fn new(len: usize, doorbell: usize) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
@@ -85,6 +88,9 @@ pub struct NvmeCompQueue {
     len: usize,
     pub doorbell: usize,
 }
+
+unsafe impl Send for NvmeCompQueue {}
+unsafe impl Sync for NvmeCompQueue {}
 
 // TODO: error handling
 impl NvmeCompQueue {
