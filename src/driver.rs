@@ -6,29 +6,30 @@ use futures::{channel::mpsc, SinkExt};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
+use crate::memory::DmaSlice;
 use crate::{
     nvme_future::{Request, State},
     pci::*,
     NvmeDevice, QUEUE_LENGTH,
 };
 
-pub struct IoRequest {
+pub struct IoRequest<'a, T: DmaSlice + 'a> {
     sender: oneshot::Sender<()>,
-    data: Vec<u8>,
+    data: &'a T,
     lba: u64,
     write: bool,
 }
 
-struct InternalState {
-    senders: Vec<mpsc::Sender<IoRequest>>,
+struct InternalState<'a, T: DmaSlice + 'a> {
+    senders: Vec<mpsc::Sender<IoRequest<'a, T>>>,
     num_q_pairs: usize,
 }
 
-pub struct Driver {
-    internal: Arc<Mutex<InternalState>>,
+pub struct Driver<'a, T: DmaSlice + 'a> {
+    internal: Arc<Mutex<InternalState<'a, T>>>,
 }
 
-impl Driver {
+impl<'a, T: DmaSlice + std::marker::Sync + std::marker::Send> Driver<'a, T> {
     pub fn new(pci_addr: &str, num_q_pairs: usize) -> Result<Self, Box<dyn Error>> {
         let mut vendor_file = pci_open_resource_ro(pci_addr, "vendor").expect("wrong pci address");
         let mut device_file = pci_open_resource_ro(pci_addr, "device").expect("wrong pci address");
@@ -59,7 +60,7 @@ impl Driver {
         for _ in 0..num_q_pairs {
             let nvme_clone = nvme_arc.clone();
 
-            let (tx, mut rx) = mpsc::channel::<IoRequest>(32);
+            let (tx, mut rx) = mpsc::channel::<IoRequest<T>>(32);
             senders.push(tx);
 
             let handle = tokio::task::spawn(async move {
@@ -107,6 +108,8 @@ impl Driver {
                         response_senders.insert(next_request_id, req.sender);
                         next_request_id += 1;
                     }
+
+                    println!("{:?}", std::thread::current().id());
                 }
             });
 
@@ -123,7 +126,7 @@ impl Driver {
         })
     }
 
-    pub async fn read(&self, dest: &[u8], lba: u64) -> Result<(), Box<dyn Error>> {
+    pub async fn read(&self, dest: &'a T, lba: u64) -> Result<(), Box<dyn Error>> {
         let mut internal_state = self.internal.lock().await;
 
         // oneshoot channel to recevie a response when I/O request has been completed
@@ -134,7 +137,7 @@ impl Driver {
 
         let request = IoRequest {
             sender: response_tx,
-            data: dest.to_vec(),
+            data: dest,
             lba: lba,
             write: false,
         };
@@ -149,7 +152,7 @@ impl Driver {
         Ok(response_rx.await.unwrap())
     }
 
-    pub async fn write(&self, data: &[u8], lba: u64) -> Result<(), Box<dyn Error>> {
+    pub async fn write(&self, data: &'a T, lba: u64) -> Result<(), Box<dyn Error>> {
         let mut internal_state = self.internal.lock().await;
 
         // oneshoot channel to recevie a response when I/O request has been completed
@@ -160,7 +163,7 @@ impl Driver {
 
         let request = IoRequest {
             sender: response_tx,
-            data: data.to_vec(),
+            data: data,
             lba: lba,
             write: true,
         };

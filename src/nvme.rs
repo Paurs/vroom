@@ -1,5 +1,5 @@
 use crate::cmd::NvmeCommand;
-use crate::memory::{Dma, DmaChunk, DmaSlice};
+use crate::memory::{Dma, DmaSlice};
 use crate::nvme_future::Request;
 use crate::pci::pci_map_resource;
 use crate::queues::*;
@@ -7,6 +7,7 @@ use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
 use std::collections::HashMap;
 use std::error::Error;
 use std::hint::spin_loop;
+use std::marker::PhantomData;
 
 // clippy doesnt like this
 #[allow(unused, clippy::upper_case_acronyms)]
@@ -93,14 +94,15 @@ struct IdentifyNamespaceData {
     vendor_specific: [u8; 3712],
 }
 
-pub struct NvmeQueuePair {
+pub struct NvmeQueuePair<T: DmaSlice> {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
     pub outstanding: HashMap<usize, usize>,
+    _type: PhantomData<T>,
 }
 
-impl NvmeQueuePair {
+impl<T: DmaSlice> NvmeQueuePair<T> {
     /// returns amount of requests pushed into submission queue
     pub fn submit_io(&mut self, data: &impl DmaSlice, mut lba: u64, write: bool) -> usize {
         let mut reqs = 0;
@@ -196,7 +198,7 @@ impl NvmeQueuePair {
 
     pub fn submit_async(
         &mut self,
-        data: Vec<u8>,
+        data: &T,
         mut lba: u64,
         write: bool,
         request_id: usize,
@@ -204,13 +206,7 @@ impl NvmeQueuePair {
         let mut reqs = 0;
         let mut requests: Vec<Request> = Vec::new();
 
-        // TODO: this is stupid
-        let mut data_slice: Dma<u8> = Dma::allocate(data.len()).unwrap();
-        for (i, &byte) in data.iter().enumerate() {
-            data_slice[i..(i + 1)].copy_from_slice(&[byte]);
-        }
-
-        for chunk in data_slice.chunks(128 * 4096) {
+        for chunk in data.chunks(2 * 4096) {
             let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
 
             let addr = chunk.phys_addr as u64;
@@ -247,6 +243,8 @@ impl NvmeQueuePair {
         requests
     }
 
+    pub fn temp(&mut self, _data: &impl DmaSlice) {}
+
     pub fn poll(&mut self) -> Option<NvmeCompletion> {
         // take completion at head from completion queue & return completion entry
         if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
@@ -271,7 +269,7 @@ impl NvmeQueuePair {
 }
 
 #[allow(unused)]
-pub struct NvmeDevice {
+pub struct NvmeDevice<T: DmaSlice> {
     pci_addr: String,
     addr: *mut u8,
     len: usize,
@@ -286,14 +284,15 @@ pub struct NvmeDevice {
     pub namespaces: HashMap<u32, NvmeNamespace>,
     pub stats: NvmeStats,
     q_id: u16,
+    _type: PhantomData<T>,
 }
 
 // TODO
-unsafe impl Send for NvmeDevice {}
-unsafe impl Sync for NvmeDevice {}
+unsafe impl<T: DmaSlice> Send for NvmeDevice<T> {}
+unsafe impl<T: DmaSlice> Sync for NvmeDevice<T> {}
 
 #[allow(unused)]
-impl NvmeDevice {
+impl<T: DmaSlice> NvmeDevice<T> {
     pub fn init(pci_addr: &str) -> Result<Self, Box<dyn Error>> {
         let (addr, len) = pci_map_resource(pci_addr)?;
         let mut dev = Self {
@@ -317,6 +316,7 @@ impl NvmeDevice {
             namespaces: HashMap::new(),
             stats: NvmeStats::default(),
             q_id: 1,
+            _type: PhantomData,
         };
 
         for i in 1..512 {
@@ -449,7 +449,7 @@ impl NvmeDevice {
     }
 
     // 1 to 1 Submission/Completion Queue Mapping
-    pub fn create_io_queue_pair(&mut self, len: usize) -> Result<NvmeQueuePair, Box<dyn Error>> {
+    pub fn create_io_queue_pair(&mut self, len: usize) -> Result<NvmeQueuePair<T>, Box<dyn Error>> {
         let q_id = self.q_id;
         println!("Requesting i/o queue pair with id {q_id}");
 
@@ -488,10 +488,11 @@ impl NvmeDevice {
             sub_queue,
             comp_queue,
             outstanding,
+            _type: PhantomData,
         })
     }
 
-    pub fn delete_io_queue_pair(&mut self, qpair: NvmeQueuePair) -> Result<(), Box<dyn Error>> {
+    pub fn delete_io_queue_pair(&mut self, qpair: NvmeQueuePair<T>) -> Result<(), Box<dyn Error>> {
         println!("Deleting i/o queue pair with id {}", qpair.id);
         self.submit_and_complete_admin(|c_id, _| {
             NvmeCommand::delete_io_submission_queue(c_id, qpair.id)
