@@ -198,11 +198,11 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
 
     pub fn submit_async(
         &mut self,
-        data: &T,
+        data: T,
         mut lba: u64,
         write: bool,
         request_id: usize,
-    ) -> Vec<Request> {
+    ) -> (Vec<Request>, T) {
         let mut reqs = 0;
         let mut requests: Vec<Request> = Vec::new();
 
@@ -240,7 +240,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         }
 
         self.outstanding.insert(request_id, reqs);
-        requests
+        (requests, data)
     }
 
     pub fn temp(&mut self, _data: &impl DmaSlice) {}

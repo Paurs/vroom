@@ -14,13 +14,12 @@ mod pci;
 #[allow(dead_code)]
 mod queues;
 
-use driver::Driver;
 pub use memory::HUGE_PAGE_SIZE;
 pub use nvme::{NvmeDevice, NvmeQueuePair};
 pub use queues::QUEUE_LENGTH;
 use std::error::Error;
 
-pub fn init(pci_addr: &str) -> Result<(), Box<dyn Error>> {
+pub fn init(_pci_addr: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 

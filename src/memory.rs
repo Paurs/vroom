@@ -34,6 +34,9 @@ pub struct Dma<T> {
     pub size: usize,
 }
 
+unsafe impl<T> Send for Dma<T> {}
+unsafe impl<T> Sync for Dma<T> {}
+
 // should be safe
 impl<T> Deref for Dma<T> {
     type Target = T;
