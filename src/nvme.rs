@@ -243,8 +243,6 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         (requests, data)
     }
 
-    pub fn temp(&mut self, _data: &impl DmaSlice) {}
-
     pub fn poll(&mut self) -> Option<NvmeCompletion> {
         // take completion at head from completion queue & return completion entry
         if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
@@ -804,7 +802,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
         Ok(())
     }
 
-    fn submit_and_complete_admin<F: FnOnce(u16, usize) -> NvmeCommand>(
+    pub fn submit_and_complete_admin<F: FnOnce(u16, usize) -> NvmeCommand>(
         &mut self,
         cmd_init: F,
     ) -> Result<NvmeCompletion, Box<dyn Error>> {

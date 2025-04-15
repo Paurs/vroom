@@ -1,11 +1,11 @@
+use futures::{channel::mpsc, SinkExt};
 use std::collections::HashMap;
 use std::{error::Error, sync::Arc};
-
-use futures::{channel::mpsc, SinkExt};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::task;
 
+use crate::cmd::NvmeCommand;
 use crate::memory::DmaSlice;
 use crate::{
     pci::*,
@@ -13,20 +13,32 @@ use crate::{
     NvmeDevice, QUEUE_LENGTH,
 };
 
-pub struct IoRequest<'a, T: DmaSlice + 'a> {
-    sender: oneshot::Sender<()>,
-    data: &'a T,
-    lba: u64,
-    write: bool,
-}
-
 struct InternalState<T: DmaSlice> {
     senders: Vec<mpsc::Sender<(oneshot::Sender<T>, T, u64, bool)>>,
     num_q_pairs: usize,
+    nvme: Arc<Mutex<NvmeDevice<T>>>,
+}
+
+impl<T: DmaSlice> InternalState<T> {
+    pub async fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut nvme = self.nvme.lock().await;
+
+        for i in 0..self.num_q_pairs {
+            nvme.submit_and_complete_admin(|c_id, _| {
+                NvmeCommand::delete_io_submission_queue(c_id, (i + 1) as u16)
+            })?;
+            nvme.submit_and_complete_admin(|c_id, _| {
+                NvmeCommand::delete_io_completion_queue(c_id, (i + 1) as u16)
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 pub struct Driver<T: DmaSlice> {
     internal: Arc<Mutex<InternalState<T>>>,
+    cleaned_up: bool,
 }
 
 impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
@@ -60,7 +72,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
         for _ in 0..num_q_pairs {
             let nvme_clone = nvme_arc.clone();
 
-            let (tx, mut rx) = mpsc::channel::<(oneshot::Sender<T>, T, u64, bool)>(32);
+            let (tx, mut rx) = mpsc::channel::<(oneshot::Sender<T>, T, u64, bool)>(1024);
             senders.push(tx);
 
             let handle = tokio::task::spawn(async move {
@@ -125,7 +137,9 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
             internal: Arc::new(Mutex::new(InternalState {
                 senders,
                 num_q_pairs,
+                nvme: nvme_arc,
             })),
+            cleaned_up: false,
         })
     }
 
@@ -165,5 +179,28 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
         }
 
         Ok(response_rx.await.unwrap())
+    }
+
+    pub async fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut internal_state = self.internal.lock().await;
+
+        if !self.cleaned_up {
+            match internal_state.cleanup().await {
+                Ok(_) => self.cleaned_up = true,
+                Err(e) => eprintln!("Error during cleanup: {}", e),
+            }
+        } else {
+            println!("Cleanup already called.");
+        }
+
+        Ok(())
+    }
+}
+
+impl<T: DmaSlice> Drop for Driver<T> {
+    fn drop(&mut self) {
+        if !self.cleaned_up {
+            eprintln!("Warning: Driver was dropped without explicit cleanup.");
+        }
     }
 }
