@@ -8,11 +8,11 @@ pub mod memory;
 #[allow(dead_code)]
 mod nvme;
 #[allow(dead_code)]
-pub mod nvme_future;
-#[allow(dead_code)]
 mod pci;
 #[allow(dead_code)]
 mod queues;
+#[allow(dead_code)]
+pub mod request;
 
 pub use memory::HUGE_PAGE_SIZE;
 pub use nvme::{NvmeDevice, NvmeQueuePair};

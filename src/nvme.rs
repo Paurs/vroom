@@ -1,8 +1,8 @@
 use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
-use crate::nvme_future::Request;
 use crate::pci::pci_map_resource;
 use crate::queues::*;
+use crate::request::Request;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
 use std::collections::HashMap;
 use std::error::Error;

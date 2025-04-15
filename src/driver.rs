@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use std::time::Duration;
 use std::{error::Error, sync::Arc};
 
 use futures::{channel::mpsc, SinkExt};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
+use tokio::task;
 
 use crate::memory::DmaSlice;
 use crate::{
-    nvme_future::{Request, State},
     pci::*,
+    request::{Request, State},
     NvmeDevice, QUEUE_LENGTH,
 };
 
@@ -76,8 +76,6 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                 let mut responses: HashMap<usize, (T, oneshot::Sender<T>)> = HashMap::new();
 
                 loop {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-
                     // poll the completion queue and send inform calling awaiting function
                     while let Some(completion) = q_pair.poll() {
                         let c_id = completion.c_id;
@@ -99,7 +97,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                                 }
                             }
 
-                            println!("{:?}", completion);
+                            //println!("{:?}", completion);
                         }
                     }
 
@@ -112,7 +110,9 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                         next_request_id += 1;
                     }
 
-                    println!("{:?}", std::thread::current().id());
+                    //println!("{:?}", std::thread::current().id());
+
+                    task::yield_now().await;
                 }
             });
 
