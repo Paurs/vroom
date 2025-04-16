@@ -72,7 +72,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
         for _ in 0..num_q_pairs {
             let nvme_clone = nvme_arc.clone();
 
-            let (tx, mut rx) = mpsc::channel::<(oneshot::Sender<T>, T, u64, bool)>(1024);
+            let (tx, mut rx) = mpsc::channel::<(oneshot::Sender<T>, T, u64, bool)>(32);
             senders.push(tx);
 
             let handle = tokio::task::spawn(async move {
@@ -87,6 +87,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
 
                 let mut responses: HashMap<usize, (T, oneshot::Sender<T>)> = HashMap::new();
 
+                let mut control = 0;
                 loop {
                     // poll the completion queue and send inform calling awaiting function
                     while let Some(completion) = q_pair.poll() {
@@ -108,8 +109,6 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                                     let _ = r_sender.send(result_buffer);
                                 }
                             }
-
-                            //println!("{:?}", completion);
                         }
                     }
 
@@ -122,9 +121,11 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                         next_request_id += 1;
                     }
 
-                    //println!("{:?}", std::thread::current().id());
-
-                    task::yield_now().await;
+                    control += 1;
+                    if control == 128 {
+                        task::yield_now().await;
+                        control = 0;
+                    }
                 }
             });
 
