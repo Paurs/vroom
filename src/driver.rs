@@ -1,9 +1,11 @@
-use futures::{channel::mpsc, SinkExt};
 use std::collections::HashMap;
+use std::sync::mpsc;
+use std::sync::Mutex as Std_Mutex;
 use std::{error::Error, sync::Arc};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::task;
+use tokio::task::JoinHandle;
 
 use crate::cmd::NvmeCommand;
 use crate::memory::DmaSlice;
@@ -14,7 +16,7 @@ use crate::{
 };
 
 struct InternalState<T: DmaSlice> {
-    senders: Vec<mpsc::Sender<(oneshot::Sender<T>, T, u64, bool)>>,
+    senders: Vec<mpsc::Sender<Option<(oneshot::Sender<T>, T, u64, bool)>>>,
     num_q_pairs: usize,
     nvme: Arc<Mutex<NvmeDevice<T>>>,
 }
@@ -23,12 +25,12 @@ impl<T: DmaSlice> InternalState<T> {
     pub async fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
         let mut nvme = self.nvme.lock().await;
 
-        for i in 0..self.num_q_pairs {
+        for i in 1..self.num_q_pairs {
             nvme.submit_and_complete_admin(|c_id, _| {
-                NvmeCommand::delete_io_submission_queue(c_id, (i + 1) as u16)
+                NvmeCommand::delete_io_submission_queue(c_id, i as u16)
             })?;
             nvme.submit_and_complete_admin(|c_id, _| {
-                NvmeCommand::delete_io_completion_queue(c_id, (i + 1) as u16)
+                NvmeCommand::delete_io_completion_queue(c_id, i as u16)
             })?;
         }
 
@@ -37,7 +39,7 @@ impl<T: DmaSlice> InternalState<T> {
 }
 
 pub struct Driver<T: DmaSlice> {
-    internal: Arc<Mutex<InternalState<T>>>,
+    internal: Arc<Std_Mutex<InternalState<T>>>,
     cleaned_up: bool,
 }
 
@@ -72,7 +74,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
         for _ in 0..num_q_pairs {
             let nvme_clone = nvme_arc.clone();
 
-            let (tx, mut rx) = mpsc::channel::<(oneshot::Sender<T>, T, u64, bool)>(32);
+            let (tx, rx) = mpsc::channel();
             senders.push(tx);
 
             let handle = tokio::task::spawn(async move {
@@ -87,12 +89,15 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
 
                 let mut responses: HashMap<usize, (T, oneshot::Sender<T>)> = HashMap::new();
 
+                let mut open_requests = Vec::new();
+                let mut num_requests = 0;
+
                 let mut control = 0;
                 loop {
                     // poll the completion queue and send inform calling awaiting function
                     while let Some(completion) = q_pair.poll() {
+                        //println!("completed");
                         let c_id = completion.c_id;
-
                         if let Some(index) = requests.iter().position(|r| r.c_id == c_id) {
                             let mut req = requests.remove(index);
                             req.state = State::Completed(completion);
@@ -107,24 +112,57 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                                     let (result_buffer, r_sender) =
                                         responses.remove(&req.r_id).unwrap();
                                     let _ = r_sender.send(result_buffer);
+                                    num_requests -= 1;
                                 }
                             }
                         }
                     }
 
                     // wait for I/O requests and submit them to submission queue
-                    while let Ok(Some((sender, data, lba, write))) = rx.try_next() {
-                        let (mut new_ftrs, result_buffer) =
-                            q_pair.submit_async(data, lba, write, next_request_id);
-                        requests.append(&mut new_ftrs);
-                        responses.insert(next_request_id, (result_buffer, sender));
-                        next_request_id += 1;
+                    while let Ok(Some((sender, data, lba, write))) = rx.try_recv() {
+                        //println!("submitted - {:?}", task::id());
+                        //tokio::time::sleep(Duration::from_millis(10)).await;
+                        num_requests += 1;
+                        if num_requests < QUEUE_LENGTH {
+                            let submission = q_pair.submit_async(data, lba, write, next_request_id);
+
+                            match submission {
+                                Ok((mut new_ftrs, result_buffer)) => {
+                                    requests.append(&mut new_ftrs);
+                                    responses.insert(next_request_id, (result_buffer, sender));
+                                    next_request_id += 1;
+                                }
+                                Err(e) => {
+                                    // Buffer requests when queue is full
+                                    open_requests.push((sender, e, lba, write));
+                                }
+                            }
+                        } else {
+                            open_requests.push((sender, data, lba, write));
+                        }
+                    }
+
+                    if num_requests < QUEUE_LENGTH && !open_requests.is_empty() {
+                        let (sender, data, lba, write) = open_requests.pop().unwrap();
+                        let submission = q_pair.submit_async(data, lba, write, next_request_id);
+
+                        match submission {
+                            Ok((mut new_ftrs, result_buffer)) => {
+                                requests.append(&mut new_ftrs);
+                                responses.insert(next_request_id, (result_buffer, sender));
+                                next_request_id += 1;
+                            }
+                            Err(e) => {
+                                // Buffer requests when queue is full
+                                open_requests.push((sender, e, lba, write));
+                            }
+                        }
                     }
 
                     control += 1;
                     if control == 128 {
-                        task::yield_now().await;
                         control = 0;
+                        task::yield_now().await;
                     }
                 }
             });
@@ -135,7 +173,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
         let _ = futures::future::join_all(handles);
 
         Ok(Driver {
-            internal: Arc::new(Mutex::new(InternalState {
+            internal: Arc::new(Std_Mutex::new(InternalState {
                 senders,
                 num_q_pairs,
                 nvme: nvme_arc,
@@ -144,8 +182,8 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
         })
     }
 
-    pub async fn read(&self, dest: T, lba: u64) -> Result<T, Box<dyn Error>> {
-        let mut internal_state = self.internal.lock().await;
+    pub fn read(&self, dest: T, lba: u64) -> Result<JoinHandle<T>, Box<dyn Error>> {
+        let mut internal_state = self.internal.lock().unwrap();
 
         // oneshoot channel to recevie a response when I/O request has been completed
         let (response_tx, response_rx) = oneshot::channel();
@@ -155,16 +193,16 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
 
         // Send the I/O request to the tokio task managing the chosen queue pair
         if let Some(sender) = internal_state.senders.get_mut(q_id) {
-            sender.send((response_tx, dest, lba, false)).await.unwrap();
+            sender.send(Some((response_tx, dest, lba, false))).unwrap();
         } else {
             return Err("Invalid queue id".into());
         }
 
-        Ok(response_rx.await.unwrap())
+        Ok(tokio::spawn(async move { response_rx.await.unwrap() }))
     }
 
-    pub async fn write(&self, data: T, lba: u64) -> Result<T, Box<dyn Error>> {
-        let mut internal_state = self.internal.lock().await;
+    pub fn write(&self, data: T, lba: u64) -> Result<JoinHandle<T>, Box<dyn Error>> {
+        let mut internal_state = self.internal.lock().unwrap();
 
         // oneshoot channel to recevie a response when I/O request has been completed
         let (response_tx, response_rx) = oneshot::channel();
@@ -174,16 +212,16 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
 
         // Send the I/O request to the tokio task managing the chosen queue pair
         if let Some(sender) = internal_state.senders.get_mut(q_id) {
-            sender.send((response_tx, data, lba, true)).await.unwrap();
+            sender.send(Some((response_tx, data, lba, true))).unwrap();
         } else {
             return Err("Invalid queue id".into());
         }
 
-        Ok(response_rx.await.unwrap())
+        Ok(tokio::spawn(async move { response_rx.await.unwrap() }))
     }
 
     pub async fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut internal_state = self.internal.lock().await;
+        let mut internal_state = self.internal.lock().unwrap();
 
         if !self.cleaned_up {
             match internal_state.cleanup().await {

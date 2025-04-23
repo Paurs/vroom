@@ -202,7 +202,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         mut lba: u64,
         write: bool,
         request_id: usize,
-    ) -> (Vec<Request>, T) {
+    ) -> Result<(Vec<Request>, T), T> {
         let mut reqs = 0;
         let mut requests: Vec<Request> = Vec::new();
 
@@ -228,7 +228,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
                     std::ptr::write_volatile(self.sub_queue.doorbell as *mut u32, tail as u32);
                 }
             } else {
-                eprintln!("queue full");
+                return Err(data);
             }
 
             lba += blocks;
@@ -240,7 +240,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         }
 
         self.outstanding.insert(request_id, reqs);
-        (requests, data)
+        Ok((requests, data))
     }
 
     pub fn poll(&mut self) -> Option<NvmeCompletion> {
