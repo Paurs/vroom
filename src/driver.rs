@@ -96,7 +96,6 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                 loop {
                     // poll the completion queue and send inform calling awaiting function
                     while let Some(completion) = q_pair.poll() {
-                        //println!("completed");
                         let c_id = completion.c_id;
                         if let Some(index) = requests.iter().position(|r| r.c_id == c_id) {
                             let mut req = requests.remove(index);
@@ -120,12 +119,9 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
 
                     // wait for I/O requests and submit them to submission queue
                     while let Ok(Some((sender, data, lba, write))) = rx.try_recv() {
-                        //println!("submitted - {:?}", task::id());
-                        //tokio::time::sleep(Duration::from_millis(10)).await;
                         num_requests += 1;
                         if num_requests < QUEUE_LENGTH {
                             let submission = q_pair.submit_async(data, lba, write, next_request_id);
-
                             match submission {
                                 Ok((mut new_ftrs, result_buffer)) => {
                                     requests.append(&mut new_ftrs);
@@ -193,7 +189,14 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
 
         // Send the I/O request to the tokio task managing the chosen queue pair
         if let Some(sender) = internal_state.senders.get_mut(q_id) {
-            sender.send(Some((response_tx, dest, lba, false))).unwrap();
+            let r = sender.send(Some((response_tx, dest, lba, false)));
+            match r {
+                Ok(_) => (),
+                Err(e) => {
+                    drop(response_rx);
+                    return Err(e.into());
+                }
+            }
         } else {
             return Err("Invalid queue id".into());
         }
@@ -212,7 +215,14 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
 
         // Send the I/O request to the tokio task managing the chosen queue pair
         if let Some(sender) = internal_state.senders.get_mut(q_id) {
-            sender.send(Some((response_tx, data, lba, true))).unwrap();
+            let r = sender.send(Some((response_tx, data, lba, true)));
+            match r {
+                Ok(_) => (),
+                Err(e) => {
+                    drop(response_rx);
+                    return Err(e.into());
+                }
+            }
         } else {
             return Err("Invalid queue id".into());
         }

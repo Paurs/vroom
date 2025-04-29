@@ -31,9 +31,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     buffer[0..12].copy_from_slice("Hello World!".as_bytes());
 
-    let f1 = driver.write(buffer.slice(0..bytes), 0);
+    let f1 = driver.write(buffer.slice(0..bytes), 0)?;
     let _ = f1.await?;
-    let f2 = driver.read(buffer.slice(0..bytes), 0);
+    let f2 = driver.read(buffer.slice(0..bytes), 0)?;
     let result = f2.await?;
 
     for b in result.chunks(2 * 4096) {

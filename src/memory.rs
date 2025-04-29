@@ -32,10 +32,29 @@ pub struct Dma<T> {
     pub virt: *mut T,
     pub phys: usize,
     pub size: usize,
+    path: Option<String>,
 }
 
 unsafe impl<T> Send for Dma<T> {}
 unsafe impl<T> Sync for Dma<T> {}
+
+impl<T> Drop for Dma<T> {
+    fn drop(&mut self) {
+        if self.path.is_some() {
+            unsafe {
+                let result = libc::munmap(self.virt as *mut libc::c_void, self.size);
+                if result == -1 {
+                    eprintln!("Error: munmap failed");
+                }
+            }
+
+            match fs::remove_file(self.path.as_mut().unwrap()) {
+                Ok(_) => (),
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+    }
+}
 
 // should be safe
 impl<T> Deref for Dma<T> {
@@ -115,6 +134,7 @@ impl DmaSlice for Dma<u8> {
                 virt: self.virt.add(index.start),
                 phys: self.phys + index.start,
                 size: (index.end - index.start),
+                path: None,
             }
         }
     }
@@ -205,6 +225,7 @@ impl<T> Dma<T> {
                         virt: ptr as *mut T,
                         phys: virt_to_phys(ptr as usize)?,
                         size,
+                        path: Some(path),
                     };
                     Ok(memory)
                 } else {
