@@ -22,19 +22,18 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let queue_num = match args.next() {
-        Some(arg) => usize::from_str_radix(&arg, 10)?,
+        Some(num) => num.parse()?,
         None => {
             eprintln!("Usage: cargo run --example init <pci bus id> <number of queue pairs> <duration in seconds>");
             process::exit(1);
         }
     };
 
-    let duration = match args.next() {
-        Some(secs) => Some(Duration::from_secs(secs.parse().expect(
-            "Usage: cargo run --example init <pci bus id> <number of queue pairs> <duration in seconds>",
-        ))),
-        None => None,
-    };
+    let duration = args.next().map(|secs| {
+        Duration::from_secs(secs.parse().expect(
+    "Usage: cargo run --example init <pci bus id> <number of queue pairs> <duration in seconds>",
+    ))
+    });
 
     let mut driver = Driver::<Dma<u8>>::new(&pci_addr, queue_num)?;
 

@@ -68,7 +68,6 @@ impl NvmeSubQueue {
 
     #[inline(always)]
     pub fn submit(&mut self, entry: NvmeCommand) -> usize {
-        // println!("SUBMISSION ENTRY: {:?}", entry);
         self.commands[self.tail] = entry;
 
         self.tail = (self.tail + 1) % self.len;
@@ -114,13 +113,12 @@ impl NvmeCompQueue {
             if self.head == 0 {
                 self.phase = !self.phase;
             }
-            Some((self.head, entry.clone(), prev))
+            Some((self.head, *entry, prev))
         } else {
             None
         }
     }
 
-    ///
     #[inline(always)]
     pub fn complete_n(&mut self, commands: usize) -> (usize, NvmeCompletion, usize) {
         let prev = self.head;
@@ -148,7 +146,7 @@ impl NvmeCompQueue {
         let entry = &self.commands[self.head];
 
         if ((entry.status & 1) == 1) == self.phase {
-            Some(entry.clone())
+            Some(*entry)
         } else {
             None
         }

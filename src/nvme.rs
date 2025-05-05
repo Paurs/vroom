@@ -109,7 +109,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         let mut reqs = 0;
         // TODO: contruct PRP list?
         for chunk in data.chunks(2 * 4096) {
-            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
+            let blocks = (chunk.slice.len() as u64).div_ceil(512);
 
             let addr = chunk.phys_addr as u64;
             let bytes = blocks * 512;
@@ -208,7 +208,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         let mut requests: Vec<Request> = Vec::new();
 
         for chunk in data.chunks(2 * 4096) {
-            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
+            let blocks = (chunk.slice.len() as u64).div_ceil(512);
 
             let addr = chunk.phys_addr as u64;
             let bytes = blocks * 512;
@@ -574,7 +574,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
     // TODO: currently namespace 1 is hardcoded
     pub fn write(&mut self, data: &impl DmaSlice, mut lba: u64) -> Result<(), Box<dyn Error>> {
         for chunk in data.chunks(2 * 4096) {
-            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
+            let blocks = (chunk.slice.len() as u64).div_ceil(512);
             self.namespace_io(1, blocks, lba, chunk.phys_addr as u64, true)?;
             lba += blocks;
         }
@@ -585,7 +585,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
     pub fn read(&mut self, dest: &impl DmaSlice, mut lba: u64) -> Result<(), Box<dyn Error>> {
         // let ns = *self.namespaces.get(&1).unwrap();
         for chunk in dest.chunks(2 * 4096) {
-            let blocks = (chunk.slice.len() as u64 + 512 - 1) / 512;
+            let blocks = (chunk.slice.len() as u64).div_ceil(512);
             self.namespace_io(1, blocks, lba, chunk.phys_addr as u64, false)?;
             lba += blocks;
         }
@@ -596,7 +596,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
         let ns = *self.namespaces.get(&1).unwrap();
         for chunk in data.chunks(128 * 4096) {
             self.buffer[..chunk.len()].copy_from_slice(chunk);
-            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
+            let blocks = (chunk.len() as u64).div_ceil(ns.block_size);
             self.namespace_io(1, blocks, lba, self.buffer.phys as u64, true)?;
             lba += blocks;
         }
@@ -607,7 +607,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
     pub fn read_copied(&mut self, dest: &mut [u8], mut lba: u64) -> Result<(), Box<dyn Error>> {
         let ns = *self.namespaces.get(&1).unwrap();
         for chunk in dest.chunks_mut(128 * 4096) {
-            let blocks = (chunk.len() as u64 + ns.block_size - 1) / ns.block_size;
+            let blocks = (chunk.len() as u64).div_ceil(ns.block_size);
             self.namespace_io(1, blocks, lba, self.buffer.phys as u64, false)?;
             lba += blocks;
             chunk.copy_from_slice(&self.buffer[..chunk.len()]);

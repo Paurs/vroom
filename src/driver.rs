@@ -17,8 +17,10 @@ use crate::{
     NvmeDevice, QUEUE_LENGTH,
 };
 
+type QueueSender<T> = mpsc::Sender<Option<(oneshot::Sender<T>, T, u64, bool)>>;
+
 struct InternalState<T: DmaSlice> {
-    senders: Vec<mpsc::Sender<Option<(oneshot::Sender<T>, T, u64, bool)>>>,
+    senders: Vec<QueueSender<T>>,
     num_q_pairs: usize,
     nvme: Arc<Mutex<NvmeDevice<T>>>,
 }
