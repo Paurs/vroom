@@ -8,7 +8,7 @@ use vroom::HUGE_PAGE_SIZE;
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
-    env::set_var("RUST_BACKTRACE", "1");
+    //env::set_var("RUST_BACKTRACE", "1");
 
     let mut args = env::args();
     args.next();
@@ -16,19 +16,27 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let pci_addr = match args.next() {
         Some(arg) => arg,
         None => {
-            eprintln!("Usage: cargo run --example init <pci bus id>");
+            eprintln!("Usage: cargo run --example init <pci bus id> <number of queue pairs> <duration in seconds>");
+            process::exit(1);
+        }
+    };
+
+    let queue_num = match args.next() {
+        Some(arg) => usize::from_str_radix(&arg, 10)?,
+        None => {
+            eprintln!("Usage: cargo run --example init <pci bus id> <number of queue pairs> <duration in seconds>");
             process::exit(1);
         }
     };
 
     let duration = match args.next() {
         Some(secs) => Some(Duration::from_secs(secs.parse().expect(
-            "Usage: cargo run --example init <pci bus id> <duration in seconds>",
+            "Usage: cargo run --example init <pci bus id> <number of queue pairs> <duration in seconds>",
         ))),
         None => None,
     };
 
-    let mut driver = Driver::<Dma<u8>>::new(&pci_addr, 9)?;
+    let mut driver = Driver::<Dma<u8>>::new(&pci_addr, queue_num)?;
 
     let time = duration.unwrap();
 
@@ -43,15 +51,14 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let mut handles = Vec::new();
 
     while start.elapsed() < time {
-        for i in 0..9 {
+        for i in 0..queue_num {
             let handle = driver.read(buffer.slice(0..bytes), i as u64)?;
             handles.push(handle);
         }
 
-        op_count += 9;
+        op_count += queue_num;
 
-        if op_count % 9216 == 0 {
-            println!("await next batch - so far: {}", op_count);
+        if (op_count % (queue_num * (256))) == 0 {
             for handle in handles.drain(..) {
                 let _ = handle.await;
             }
@@ -62,7 +69,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Time up, ops: {}", op_count);
 
-    println!("{} ops in {} sec", op_count, time.as_secs());
+    println!("{} iops", (op_count as f64 / time.as_secs() as f64));
 
     driver.cleanup().await?;
 
