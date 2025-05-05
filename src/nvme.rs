@@ -4,6 +4,7 @@ use crate::pci::pci_map_resource;
 use crate::queues::*;
 use crate::request::Request;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
+use core::fmt;
 use std::collections::HashMap;
 use std::error::Error;
 use std::hint::spin_loop;
@@ -266,6 +267,27 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
     }
 }
 
+#[derive(Debug)]
+pub struct QueueError {
+    message: String,
+}
+
+impl Error for QueueError {}
+
+impl fmt::Display for QueueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl From<Box<dyn std::error::Error>> for QueueError {
+    fn from(value: Box<dyn std::error::Error>) -> Self {
+        QueueError {
+            message: value.to_string(),
+        }
+    }
+}
+
 #[allow(unused)]
 pub struct NvmeDevice<T: DmaSlice> {
     pci_addr: String,
@@ -447,7 +469,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
     }
 
     // 1 to 1 Submission/Completion Queue Mapping
-    pub fn create_io_queue_pair(&mut self, len: usize) -> Result<NvmeQueuePair<T>, Box<dyn Error>> {
+    pub fn create_io_queue_pair(&mut self, len: usize) -> Result<NvmeQueuePair<T>, QueueError> {
         let q_id = self.q_id;
         println!("Requesting i/o queue pair with id {q_id}");
 
@@ -814,7 +836,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
         self.write_reg_idx(NvmeArrayRegs::CQyHDBL, 0, head as u32);
         let status = entry.status >> 1;
         if status != 0 {
-            eprintln!(
+            println!(
                 "Status: 0x{:x}, Status Code 0x{:x}, Status Code Type: 0x{:x}",
                 status,
                 status & 0xFF,

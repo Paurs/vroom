@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::panic;
 use std::sync::mpsc;
 use std::sync::Mutex as Std_Mutex;
 use std::{error::Error, sync::Arc};
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
-use tokio::task;
+use tokio::task::yield_now;
 use tokio::task::JoinHandle;
 
 use crate::cmd::NvmeCommand;
 use crate::memory::DmaSlice;
+use crate::nvme::QueueError;
 use crate::{
     pci::*,
     request::{Request, State},
@@ -43,6 +45,7 @@ pub struct Driver<T: DmaSlice> {
     cleaned_up: bool,
 }
 
+#[allow(unreachable_code)]
 impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
     pub fn new(pci_addr: &str, num_q_pairs: usize) -> Result<Self, Box<dyn Error>> {
         let mut vendor_file = pci_open_resource_ro(pci_addr, "vendor").expect("wrong pci address");
@@ -78,11 +81,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
             senders.push(tx);
 
             let handle = tokio::task::spawn(async move {
-                let mut q_pair = nvme_clone
-                    .lock()
-                    .await
-                    .create_io_queue_pair(QUEUE_LENGTH)
-                    .unwrap();
+                let mut q_pair = nvme_clone.lock().await.create_io_queue_pair(QUEUE_LENGTH)?;
 
                 let mut requests: Vec<Request> = Vec::new();
                 let mut next_request_id: usize = 0;
@@ -92,7 +91,6 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                 let mut open_requests = Vec::new();
                 let mut num_requests = 0;
 
-                let mut control = 0;
                 loop {
                     // poll the completion queue and send inform calling awaiting function
                     while let Some(completion) = q_pair.poll() {
@@ -118,23 +116,19 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                     }
 
                     // wait for I/O requests and submit them to submission queue
-                    while let Ok(Some((sender, data, lba, write))) = rx.try_recv() {
+                    if let Ok(Some((sender, data, lba, write))) = rx.try_recv() {
                         num_requests += 1;
-                        if num_requests < QUEUE_LENGTH {
-                            let submission = q_pair.submit_async(data, lba, write, next_request_id);
-                            match submission {
-                                Ok((mut new_ftrs, result_buffer)) => {
-                                    requests.append(&mut new_ftrs);
-                                    responses.insert(next_request_id, (result_buffer, sender));
-                                    next_request_id += 1;
-                                }
-                                Err(e) => {
-                                    // Buffer requests when queue is full
-                                    open_requests.push((sender, e, lba, write));
-                                }
+                        let submission = q_pair.submit_async(data, lba, write, next_request_id);
+                        match submission {
+                            Ok((mut new_ftrs, result_buffer)) => {
+                                requests.append(&mut new_ftrs);
+                                responses.insert(next_request_id, (result_buffer, sender));
+                                next_request_id += 1;
                             }
-                        } else {
-                            open_requests.push((sender, data, lba, write));
+                            Err(e) => {
+                                // Buffer requests when queue is full
+                                open_requests.push((sender, e, lba, write));
+                            }
                         }
                     }
 
@@ -155,12 +149,9 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                         }
                     }
 
-                    control += 1;
-                    if control == 128 {
-                        control = 0;
-                        task::yield_now().await;
-                    }
+                    yield_now().await;
                 }
+                Ok::<(), QueueError>(())
             });
 
             handles.push(handle);
@@ -194,14 +185,22 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
                 Ok(_) => (),
                 Err(e) => {
                     drop(response_rx);
-                    return Err(e.into());
+                    panic!("Error: {}", e)
                 }
             }
         } else {
             return Err("Invalid queue id".into());
         }
 
-        Ok(tokio::spawn(async move { response_rx.await.unwrap() }))
+        Ok(tokio::spawn(async move {
+            let response = response_rx.await;
+            match response {
+                Ok(data) => data,
+                Err(e) => {
+                    panic!("Error: {}", e)
+                }
+            }
+        }))
     }
 
     pub fn write(&self, data: T, lba: u64) -> Result<JoinHandle<T>, Box<dyn Error>> {
@@ -227,7 +226,15 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
             return Err("Invalid queue id".into());
         }
 
-        Ok(tokio::spawn(async move { response_rx.await.unwrap() }))
+        Ok(tokio::spawn(async move {
+            let response = response_rx.await;
+            match response {
+                Ok(data) => data,
+                Err(e) => {
+                    panic!("Error: {}", e)
+                }
+            }
+        }))
     }
 
     pub async fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
