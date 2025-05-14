@@ -41,6 +41,7 @@ unsafe impl Send for NvmeSubQueue {}
 unsafe impl Sync for NvmeSubQueue {}
 
 impl NvmeSubQueue {
+    #[tracing::instrument]
     pub fn new(len: usize, doorbell: usize) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             commands: Dma::allocate(crate::memory::HUGE_PAGE_SIZE)?,
@@ -51,14 +52,17 @@ impl NvmeSubQueue {
         })
     }
 
+    #[tracing::instrument]
     pub fn is_empty(&self) -> bool {
         self.head == self.tail
     }
 
+    #[tracing::instrument]
     pub fn is_full(&self) -> bool {
         self.head == (self.tail + 1) % self.len
     }
 
+    #[tracing::instrument]
     pub fn submit_checked(&mut self, entry: NvmeCommand) -> Option<usize> {
         if self.is_full() {
             None
@@ -67,8 +71,8 @@ impl NvmeSubQueue {
         }
     }
 
+    #[tracing::instrument]
     #[inline(always)]
-
     pub fn submit(&mut self, entry: NvmeCommand) -> usize {
         self.commands[self.tail] = entry;
 
@@ -76,6 +80,7 @@ impl NvmeSubQueue {
         self.tail
     }
 
+    #[tracing::instrument]
     pub fn get_addr(&self) -> usize {
         self.commands.phys
     }
@@ -96,6 +101,7 @@ unsafe impl Sync for NvmeCompQueue {}
 
 // TODO: error handling
 impl NvmeCompQueue {
+    #[tracing::instrument]
     pub fn new(len: usize, doorbell: usize) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             commands: Dma::allocate(crate::memory::HUGE_PAGE_SIZE)?,
@@ -106,6 +112,7 @@ impl NvmeCompQueue {
         })
     }
 
+    #[tracing::instrument]
     #[inline(always)]
     pub fn complete(&mut self) -> Option<(usize, NvmeCompletion, usize)> {
         let entry = &self.commands[self.head];
@@ -122,6 +129,7 @@ impl NvmeCompQueue {
         }
     }
 
+    #[tracing::instrument]
     #[inline(always)]
     pub fn complete_n(&mut self, commands: usize) -> (usize, NvmeCompletion, usize) {
         let prev = self.head;
@@ -135,6 +143,7 @@ impl NvmeCompQueue {
         (head, entry, prev)
     }
 
+    #[tracing::instrument]
     #[inline(always)]
     pub fn complete_spin(&mut self) -> (usize, NvmeCompletion, usize) {
         loop {
@@ -145,16 +154,7 @@ impl NvmeCompQueue {
         }
     }
 
-    pub fn complete_async(&mut self) -> Option<NvmeCompletion> {
-        let entry = &self.commands[self.head];
-
-        if ((entry.status & 1) == 1) == self.phase {
-            Some(*entry)
-        } else {
-            None
-        }
-    }
-
+    #[tracing::instrument]
     pub fn new_head(&mut self) -> (usize, usize) {
         let prev = self.head;
         self.head = (self.head + 1) % self.len;
@@ -164,6 +164,7 @@ impl NvmeCompQueue {
         (self.head, prev)
     }
 
+    #[tracing::instrument]
     pub fn get_addr(&self) -> usize {
         self.commands.phys
     }

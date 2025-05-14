@@ -12,3 +12,10 @@ Cargo.lock
 .DS_Store
 # Shakespeare
 *.txt
+
+# python
+.venv
+__pycache__/
+*.py
+
+

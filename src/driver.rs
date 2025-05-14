@@ -17,6 +17,7 @@ pub struct Driver<T: DmaSlice + Debug> {
 
 #[allow(unreachable_code)]
 impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driver<T> {
+    #[tracing::instrument]
     pub fn new(pci_addr: &str, num_q_pairs: usize) -> Result<Arc<Self>, Box<dyn Error>> {
         let mut vendor_file = pci_open_resource_ro(pci_addr, "vendor").expect("wrong pci address");
         let mut device_file = pci_open_resource_ro(pci_addr, "device").expect("wrong pci address");
@@ -61,6 +62,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         Ok(driver)
     }
 
+    #[tracing::instrument]
     async fn submit(
         &self,
         q_id: usize,
@@ -77,6 +79,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         None
     }
 
+    #[tracing::instrument]
     #[allow(unused_assignments)]
     fn start_polling(self: &Arc<Self>) {
         for q_id in 0..self.queue_pairs.len() {
@@ -114,6 +117,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         }
     }
 
+    #[tracing::instrument]
     pub async fn read(&self, q_id: usize, data: &T, lba: u64) -> Vec<Request> {
         let mut requests = Vec::new();
         let mut acutal_qid = q_id;
@@ -149,6 +153,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         requests
     }
 
+    #[tracing::instrument]
     pub async fn read_batch(&self, q_id: usize, datas: &[T], lbas: &[u64]) -> Vec<Request> {
         assert_eq!(
             datas.len(),
@@ -188,6 +193,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         requests
     }
 
+    #[tracing::instrument]
     pub async fn write(&self, q_id: usize, data: &T, lba: u64) -> Vec<Request> {
         let mut requests = Vec::new();
         let mut acutal_qid = q_id;
@@ -223,6 +229,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         requests
     }
 
+    #[tracing::instrument]
     pub async fn write_batch(&self, q_id: usize, datas: &[T], lbas: &[u64]) -> Vec<Request> {
         assert_eq!(
             datas.len(),
@@ -262,6 +269,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         requests
     }
 
+    #[tracing::instrument]
     pub async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut nvme = self.nvme.lock().await;
         for q_pair in &self.queue_pairs {

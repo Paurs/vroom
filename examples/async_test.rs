@@ -16,6 +16,7 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[tracing::instrument]
 #[tokio::main(flavor = "multi_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     //env::set_var("RUST_BACKTRACE", "1");
@@ -122,7 +123,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         let _ = futures::future::join_all(drained).await;
     }
 
-    println!("{} iops", (op_count as f64 / time.as_secs_f64()));
+    println!("{}", (op_count as f64 / time.as_secs_f64()));
 
     driver.cleanup().await
 }

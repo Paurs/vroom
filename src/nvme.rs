@@ -96,7 +96,7 @@ struct IdentifyNamespaceData {
 }
 
 #[derive(Debug)]
-pub struct NvmeQueuePair<T: DmaSlice> {
+pub struct NvmeQueuePair<T: DmaSlice + Debug> {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
@@ -104,7 +104,7 @@ pub struct NvmeQueuePair<T: DmaSlice> {
     _type: PhantomData<T>,
 }
 
-impl<T: DmaSlice> NvmeQueuePair<T> {
+impl<T: DmaSlice + Debug> NvmeQueuePair<T> {
     /// returns amount of requests pushed into submission queue
     pub fn submit_io(&mut self, data: &impl DmaSlice, mut lba: u64, write: bool) -> usize {
         let mut reqs = 0;
@@ -198,6 +198,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         None
     }
 
+    #[tracing::instrument]
     pub fn submit_async(
         &mut self,
         data: &T,
@@ -242,12 +243,14 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         (last_tail, ids)
     }
 
+    #[tracing::instrument]
     pub fn set_tail(&mut self, tail: u32) {
         unsafe {
             std::ptr::write_volatile(self.sub_queue.doorbell as *mut u32, tail);
         }
     }
 
+    #[tracing::instrument]
     pub fn poll(&mut self) -> Option<u16> {
         // take completion at head from completion queue & return completion entry
         if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
@@ -270,6 +273,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
         None
     }
 
+    #[tracing::instrument]
     pub fn poll_multi(&mut self, max: usize) -> Vec<u16> {
         let mut ids = Vec::with_capacity(max);
 
@@ -322,7 +326,7 @@ impl From<Box<dyn std::error::Error>> for QueueError {
 
 #[derive(Debug)]
 #[allow(unused)]
-pub struct NvmeDevice<T: DmaSlice> {
+pub struct NvmeDevice<T: DmaSlice + Debug> {
     pci_addr: String,
     addr: *mut u8,
     len: usize,
@@ -341,11 +345,12 @@ pub struct NvmeDevice<T: DmaSlice> {
 }
 
 // TODO
-unsafe impl<T: DmaSlice> Send for NvmeDevice<T> {}
-unsafe impl<T: DmaSlice> Sync for NvmeDevice<T> {}
+unsafe impl<T: DmaSlice + Debug> Send for NvmeDevice<T> {}
+unsafe impl<T: DmaSlice + Debug> Sync for NvmeDevice<T> {}
 
 #[allow(unused)]
-impl<T: DmaSlice> NvmeDevice<T> {
+impl<T: DmaSlice + Debug> NvmeDevice<T> {
+    #[tracing::instrument]
     pub fn init(pci_addr: &str) -> Result<Self, Box<dyn Error>> {
         let (addr, len) = pci_map_resource(pci_addr)?;
         let mut dev = Self {
