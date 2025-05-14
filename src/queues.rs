@@ -27,6 +27,7 @@ pub struct NvmeCompletion {
 pub const QUEUE_LENGTH: usize = 1024;
 
 /// Submission queue
+#[derive(Debug)]
 pub struct NvmeSubQueue {
     // TODO: switch to mempool for larger queue
     commands: Dma<[NvmeCommand; QUEUE_LENGTH]>,
@@ -67,6 +68,7 @@ impl NvmeSubQueue {
     }
 
     #[inline(always)]
+
     pub fn submit(&mut self, entry: NvmeCommand) -> usize {
         self.commands[self.tail] = entry;
 
@@ -80,6 +82,7 @@ impl NvmeSubQueue {
 }
 
 /// Completion queue
+#[derive(Debug)]
 pub struct NvmeCompQueue {
     commands: Dma<[NvmeCompletion; QUEUE_LENGTH]>,
     head: usize,

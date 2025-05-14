@@ -2,11 +2,11 @@ use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
 use crate::pci::pci_map_resource;
 use crate::queues::*;
-use crate::request::Request;
 use crate::{NvmeNamespace, NvmeStats, HUGE_PAGE_SIZE};
 use core::fmt;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fmt::Debug;
 use std::hint::spin_loop;
 use std::marker::PhantomData;
 
@@ -95,6 +95,7 @@ struct IdentifyNamespaceData {
     vendor_specific: [u8; 3712],
 }
 
+#[derive(Debug)]
 pub struct NvmeQueuePair<T: DmaSlice> {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
@@ -199,15 +200,17 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
 
     pub fn submit_async(
         &mut self,
-        data: T,
+        data: &T,
         mut lba: u64,
         write: bool,
-        request_id: usize,
-    ) -> Result<(Vec<Request>, T), T> {
-        let mut reqs = 0;
-        let mut requests: Vec<Request> = Vec::new();
+    ) -> (Option<usize>, Vec<u16>) {
+        let mut ids: Vec<u16> = Vec::new();
 
-        for chunk in data.chunks(2 * 4096) {
+        let mut last_tail = None;
+
+        let chunks = data.chunks(2 * 4096);
+
+        for chunk in chunks {
             let blocks = (chunk.slice.len() as u64).div_ceil(512);
 
             let addr = chunk.phys_addr as u64;
@@ -217,7 +220,7 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
             } else {
                 addr + 4096 // self.page_size
             };
-            let c_id: u16 = self.id << 11 | self.sub_queue.tail as u16;
+            let c_id = self.id << 11 | self.sub_queue.tail as u16;
             let entry = if write {
                 NvmeCommand::io_write(c_id, 1, lba, blocks as u16 - 1, addr, ptr1)
             } else {
@@ -225,26 +228,27 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
             };
 
             if let Some(tail) = self.sub_queue.submit_checked(entry) {
-                unsafe {
-                    std::ptr::write_volatile(self.sub_queue.doorbell as *mut u32, tail as u32);
-                }
+                last_tail = Some(tail);
             } else {
-                return Err(data);
+                eprintln!("queue full");
+                return (last_tail, ids);
             }
 
             lba += blocks;
 
-            let req = Request::new(c_id, request_id);
-            requests.push(req);
-
-            reqs += 1;
+            ids.push(c_id);
         }
 
-        self.outstanding.insert(request_id, reqs);
-        Ok((requests, data))
+        (last_tail, ids)
     }
 
-    pub fn poll(&mut self) -> Option<NvmeCompletion> {
+    pub fn set_tail(&mut self, tail: u32) {
+        unsafe {
+            std::ptr::write_volatile(self.sub_queue.doorbell as *mut u32, tail);
+        }
+    }
+
+    pub fn poll(&mut self) -> Option<u16> {
         // take completion at head from completion queue & return completion entry
         if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
             unsafe {
@@ -261,9 +265,37 @@ impl<T: DmaSlice> NvmeQueuePair<T> {
                 );
                 eprintln!("{:?}", c_entry);
             }
-            return Some(c_entry);
+            return Some(c_entry.c_id);
         }
         None
+    }
+
+    pub fn poll_multi(&mut self, max: usize) -> Vec<u16> {
+        let mut ids = Vec::with_capacity(max);
+
+        for _ in 0..max {
+            if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
+                unsafe {
+                    std::ptr::write_volatile(self.comp_queue.doorbell as *mut u32, tail as u32);
+                }
+                self.sub_queue.head = c_entry.sq_head as usize;
+                let status = c_entry.status >> 1;
+                if status != 0 {
+                    eprintln!(
+                        "Status: 0x{:x}, Status Code 0x{:x}, Status Code Type: 0x{:x}",
+                        status,
+                        status & 0xFF,
+                        (status >> 8) & 0x7
+                    );
+                    eprintln!("{:?}", c_entry);
+                }
+                ids.push(c_entry.c_id);
+            } else {
+                break;
+            }
+        }
+
+        ids
     }
 }
 
@@ -288,6 +320,7 @@ impl From<Box<dyn std::error::Error>> for QueueError {
     }
 }
 
+#[derive(Debug)]
 #[allow(unused)]
 pub struct NvmeDevice<T: DmaSlice> {
     pci_addr: String,
@@ -343,11 +376,11 @@ impl<T: DmaSlice> NvmeDevice<T> {
             dev.prp_list[i - 1] = (dev.buffer.phys + i * 4096) as u64;
         }
 
-        println!("CAP: 0x{:x}", dev.get_reg64(NvmeRegs64::CAP as u64));
-        println!("VS: 0x{:x}", dev.get_reg32(NvmeRegs32::VS as u32));
-        println!("CC: 0x{:x}", dev.get_reg32(NvmeRegs32::CC as u32));
+        //println!("CAP: 0x{:x}", dev.get_reg64(NvmeRegs64::CAP as u64));
+        //println!("VS: 0x{:x}", dev.get_reg32(NvmeRegs32::VS as u32));
+        //println!("CC: 0x{:x}", dev.get_reg32(NvmeRegs32::CC as u32));
 
-        println!("Disabling controller");
+        //println!("Disabling controller");
         // Set Enable bit to 0
         let ctrl_config = dev.get_reg32(NvmeRegs32::CC as u32) & 0xFFFF_FFFE;
         dev.set_reg32(NvmeRegs32::CC as u32, ctrl_config);
@@ -385,7 +418,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
         dev.set_reg32(NvmeRegs32::CC as u32, cc);
 
         // Enable the controller
-        println!("Enabling controller");
+        //println!("Enabling controller");
         let ctrl_config = dev.get_reg32(NvmeRegs32::CC as u32) | 1;
         dev.set_reg32(NvmeRegs32::CC as u32, ctrl_config);
 
@@ -401,12 +434,12 @@ impl<T: DmaSlice> NvmeDevice<T> {
 
         let q_id = dev.q_id;
         let addr = dev.io_cq.get_addr();
-        println!("Requesting i/o completion queue");
+        //println!("Requesting i/o completion queue");
         let comp = dev.submit_and_complete_admin(|c_id, _| {
             NvmeCommand::create_io_completion_queue(c_id, q_id, addr, (QUEUE_LENGTH - 1) as u16)
         })?;
         let addr = dev.io_sq.get_addr();
-        println!("Requesting i/o submission queue");
+        //println!("Requesting i/o submission queue");
         let comp = dev.submit_and_complete_admin(|c_id, _| {
             NvmeCommand::create_io_submission_queue(
                 c_id,
@@ -428,10 +461,10 @@ impl<T: DmaSlice> NvmeDevice<T> {
     }
 
     pub fn identify_controller(&mut self) -> Result<(), Box<dyn Error>> {
-        println!("Trying to identify controller");
+        //println!("Trying to identify controller");
         let _entry = self.submit_and_complete_admin(NvmeCommand::identify_controller);
 
-        println!("Dumping identify controller");
+        //println!("Dumping identify controller");
         let mut serial = String::new();
         let data = &self.buffer;
 
@@ -458,12 +491,12 @@ impl<T: DmaSlice> NvmeDevice<T> {
             firmware.push(b as char);
         }
 
-        println!(
-            "  - Model: {} Serial: {} Firmware: {}",
-            model.trim(),
-            serial.trim(),
-            firmware.trim()
-        );
+        //println!(
+        //    "  - Model: {} Serial: {} Firmware: {}",
+        //    model.trim(),
+        //    serial.trim(),
+        //    firmware.trim()
+        //);
 
         Ok(())
     }
@@ -471,7 +504,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
     // 1 to 1 Submission/Completion Queue Mapping
     pub fn create_io_queue_pair(&mut self, len: usize) -> Result<NvmeQueuePair<T>, QueueError> {
         let q_id = self.q_id;
-        println!("Requesting i/o queue pair with id {q_id}");
+        //println!("Requesting i/o queue pair with id {q_id}");
 
         let offset = 0x1000 + ((4 << self.dstrd) * (2 * q_id + 1) as usize);
         assert!(offset <= self.len - 4, "SQ doorbell offset out of bounds");
@@ -560,7 +593,7 @@ impl<T: DmaSlice> NvmeDevice<T> {
         };
 
         // TODO: check metadata?
-        println!("Namespace {id}, Size: {size}, Blocks: {blocks}, Block size: {block_size}");
+        //println!("Namespace {id}, Size: {size}, Blocks: {blocks}, Block size: {block_size}");
 
         let namespace = NvmeNamespace {
             id,

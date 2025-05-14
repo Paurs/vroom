@@ -1,55 +1,23 @@
-use std::collections::HashMap;
-use std::panic;
-use std::sync::mpsc;
-use std::sync::Mutex as Std_Mutex;
-use std::{error::Error, sync::Arc};
-use tokio::sync::oneshot;
-use tokio::sync::Mutex;
-use tokio::task::yield_now;
-use tokio::task::JoinHandle;
+use std::{collections::HashMap, error::Error, fmt::Debug, sync::Arc};
 
-use crate::cmd::NvmeCommand;
-use crate::memory::DmaSlice;
-use crate::nvme::QueueError;
+use futures::lock::Mutex;
+use tokio::sync::oneshot::{self, Sender};
+
 use crate::{
-    pci::*,
-    request::{Request, State},
-    NvmeDevice, QUEUE_LENGTH,
+    cmd::NvmeCommand, memory::DmaSlice, pci::*, request::Request, NvmeDevice, NvmeQueuePair,
+    QUEUE_LENGTH,
 };
 
-type QueueSender<T> = mpsc::Sender<Option<(oneshot::Sender<T>, T, u64, bool)>>;
-
-struct InternalState<T: DmaSlice> {
-    senders: Vec<QueueSender<T>>,
-    num_q_pairs: usize,
+#[derive(Debug)]
+pub struct Driver<T: DmaSlice + Debug> {
+    queue_pairs: Vec<Mutex<NvmeQueuePair<T>>>,
+    pending: Vec<Mutex<HashMap<u16, Sender<std::io::Result<()>>>>>,
     nvme: Arc<Mutex<NvmeDevice<T>>>,
 }
 
-impl<T: DmaSlice> InternalState<T> {
-    pub async fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut nvme = self.nvme.lock().await;
-
-        for i in 1..self.num_q_pairs {
-            nvme.submit_and_complete_admin(|c_id, _| {
-                NvmeCommand::delete_io_submission_queue(c_id, i as u16)
-            })?;
-            nvme.submit_and_complete_admin(|c_id, _| {
-                NvmeCommand::delete_io_completion_queue(c_id, i as u16)
-            })?;
-        }
-
-        Ok(())
-    }
-}
-
-pub struct Driver<T: DmaSlice> {
-    internal: Arc<Std_Mutex<InternalState<T>>>,
-    cleaned_up: bool,
-}
-
 #[allow(unreachable_code)]
-impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
-    pub fn new(pci_addr: &str, num_q_pairs: usize) -> Result<Self, Box<dyn Error>> {
+impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driver<T> {
+    pub fn new(pci_addr: &str, num_q_pairs: usize) -> Result<Arc<Self>, Box<dyn Error>> {
         let mut vendor_file = pci_open_resource_ro(pci_addr, "vendor").expect("wrong pci address");
         let mut device_file = pci_open_resource_ro(pci_addr, "device").expect("wrong pci address");
         let mut config_file = pci_open_resource_ro(pci_addr, "config").expect("wrong pci address");
@@ -64,201 +32,248 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static> Driver<T> {
             return Err(format!("device {} is not a block device", pci_addr).into());
         }
 
-        let mut nvme = NvmeDevice::init(pci_addr)?;
+        let mut nvme = NvmeDevice::<T>::init(pci_addr)?;
         nvme.identify_controller()?;
         let ns = nvme.identify_namespace_list(0);
         for n in ns {
-            println!("ns_id: {n}");
+            //println!("ns_id: {n}");
             nvme.identify_namespace(n);
         }
 
-        let mut senders = Vec::new();
-        let mut handles = vec![];
-        let nvme_arc = Arc::new(Mutex::new(nvme));
-
+        let mut queue_pairs = Vec::new();
         for _ in 0..num_q_pairs {
-            let nvme_clone = nvme_arc.clone();
+            queue_pairs.push(Mutex::new(nvme.create_io_queue_pair(QUEUE_LENGTH)?));
+        }
 
-            let (tx, rx) = mpsc::channel();
-            senders.push(tx);
+        let mut pending = Vec::new();
+        for _ in 0..num_q_pairs {
+            pending.push(Mutex::new(HashMap::new()));
+        }
 
-            let handle = tokio::task::spawn(async move {
-                let mut q_pair = nvme_clone.lock().await.create_io_queue_pair(QUEUE_LENGTH)?;
+        let driver = Arc::new(Driver {
+            queue_pairs,
+            pending,
+            nvme: Arc::new(Mutex::new(nvme)),
+        });
 
-                let mut requests: Vec<Request> = Vec::new();
-                let mut next_request_id: usize = 0;
+        driver.start_polling();
 
-                let mut responses: HashMap<usize, (T, oneshot::Sender<T>)> = HashMap::new();
+        Ok(driver)
+    }
 
-                let mut open_requests = Vec::new();
-                let mut num_requests = 0;
+    async fn submit(
+        &self,
+        q_id: usize,
+        data: &T,
+        lba: u64,
+        write: bool,
+    ) -> Option<(Option<usize>, Vec<u16>)> {
+        if let Some(mut q_pair) = self.queue_pairs[q_id].try_lock() {
+            let (tail, ids) = q_pair.submit_async(data, lba, write);
+            if !ids.is_empty() {
+                return Some((tail, ids));
+            }
+        }
+        None
+    }
 
+    #[allow(unused_assignments)]
+    fn start_polling(self: &Arc<Self>) {
+        for q_id in 0..self.queue_pairs.len() {
+            let driver = Arc::clone(self);
+
+            tokio::spawn(async move {
+                let mut empty_poll_count = 0;
                 loop {
-                    // poll the completion queue and send inform calling awaiting function
-                    while let Some(completion) = q_pair.poll() {
-                        let c_id = completion.c_id;
-                        if let Some(index) = requests.iter().position(|r| r.c_id == c_id) {
-                            let mut req = requests.remove(index);
-                            req.state = State::Completed(completion);
-                            q_pair
-                                .outstanding
-                                .entry(req.r_id)
-                                .and_modify(|num| *num -= 1);
+                    let completed_ids = {
+                        let mut q_pair = driver.queue_pairs[q_id].lock().await;
+                        q_pair.poll_multi(16)
+                    };
 
-                            if let Some(&value) = q_pair.outstanding.get(&req.r_id) {
-                                if value == 0 {
-                                    q_pair.outstanding.remove(&req.r_id);
-                                    let (result_buffer, r_sender) =
-                                        responses.remove(&req.r_id).unwrap();
-                                    let _ = r_sender.send(result_buffer);
-                                    num_requests -= 1;
-                                }
+                    if !completed_ids.is_empty() {
+                        empty_poll_count = 0;
+
+                        for id in completed_ids {
+                            if let Some(sender) = driver.pending[q_id].lock().await.remove(&id) {
+                                let _ = sender.send(Ok(()));
                             }
                         }
-                    }
+                    } else {
+                        empty_poll_count = std::cmp::min(empty_poll_count + 1, 20);
 
-                    // wait for I/O requests and submit them to submission queue
-                    if let Ok(Some((sender, data, lba, write))) = rx.try_recv() {
-                        num_requests += 1;
-                        let submission = q_pair.submit_async(data, lba, write, next_request_id);
-                        match submission {
-                            Ok((mut new_ftrs, result_buffer)) => {
-                                requests.append(&mut new_ftrs);
-                                responses.insert(next_request_id, (result_buffer, sender));
-                                next_request_id += 1;
-                            }
-                            Err(e) => {
-                                // Buffer requests when queue is full
-                                open_requests.push((sender, e, lba, write));
-                            }
+                        if empty_poll_count > 10 {
+                            let sleep_duration =
+                                std::time::Duration::from_micros(1 << (empty_poll_count - 10));
+                            tokio::time::sleep(sleep_duration).await;
+                        } else {
+                            tokio::task::yield_now().await;
                         }
                     }
-
-                    if num_requests < QUEUE_LENGTH && !open_requests.is_empty() {
-                        let (sender, data, lba, write) = open_requests.pop().unwrap();
-                        let submission = q_pair.submit_async(data, lba, write, next_request_id);
-
-                        match submission {
-                            Ok((mut new_ftrs, result_buffer)) => {
-                                requests.append(&mut new_ftrs);
-                                responses.insert(next_request_id, (result_buffer, sender));
-                                next_request_id += 1;
-                            }
-                            Err(e) => {
-                                // Buffer requests when queue is full
-                                open_requests.push((sender, e, lba, write));
-                            }
-                        }
-                    }
-
-                    yield_now().await;
                 }
-                Ok::<(), QueueError>(())
             });
-
-            handles.push(handle);
         }
-
-        let _ = futures::future::join_all(handles);
-
-        Ok(Driver {
-            internal: Arc::new(Std_Mutex::new(InternalState {
-                senders,
-                num_q_pairs,
-                nvme: nvme_arc,
-            })),
-            cleaned_up: false,
-        })
     }
 
-    pub fn read(&self, dest: T, lba: u64) -> Result<JoinHandle<T>, Box<dyn Error>> {
-        let mut internal_state = self.internal.lock().unwrap();
-
-        // oneshoot channel to recevie a response when I/O request has been completed
-        let (response_tx, response_rx) = oneshot::channel();
-
-        // Choose a Queue pair to submit I/O request
-        let q_id = (lba % internal_state.num_q_pairs as u64) as usize;
-
-        // Send the I/O request to the tokio task managing the chosen queue pair
-        if let Some(sender) = internal_state.senders.get_mut(q_id) {
-            let r = sender.send(Some((response_tx, dest, lba, false)));
-            match r {
-                Ok(_) => (),
-                Err(e) => {
-                    drop(response_rx);
-                    panic!("Error: {}", e)
+    pub async fn read(&self, q_id: usize, data: &T, lba: u64) -> Vec<Request> {
+        let mut requests = Vec::new();
+        let mut acutal_qid = q_id;
+        loop {
+            match self.submit(acutal_qid, data, lba, false).await {
+                Some((tail, ids)) => {
+                    if ids.is_empty() {
+                        println!("Empty command id list");
+                    }
+                    for &c_id in ids.iter() {
+                        let (sender, receiver) = oneshot::channel();
+                        {
+                            let mut pending = self.pending[q_id].lock().await;
+                            pending.insert(c_id, sender);
+                        }
+                        requests.push(Request {
+                            id: c_id,
+                            receiver,
+                            state: crate::request::State::Submitted,
+                        });
+                    }
+                    if let Some(tail) = tail {
+                        self.queue_pairs[acutal_qid]
+                            .lock()
+                            .await
+                            .set_tail(tail as u32);
+                    }
+                    break;
                 }
+                None => acutal_qid = (acutal_qid + 1) % self.queue_pairs.len(),
             }
-        } else {
-            return Err("Invalid queue id".into());
         }
-
-        Ok(tokio::spawn(async move {
-            let response = response_rx.await;
-            match response {
-                Ok(data) => data,
-                Err(e) => {
-                    panic!("Error: {}", e)
-                }
-            }
-        }))
+        requests
     }
 
-    pub fn write(&self, data: T, lba: u64) -> Result<JoinHandle<T>, Box<dyn Error>> {
-        let mut internal_state = self.internal.lock().unwrap();
+    pub async fn read_batch(&self, q_id: usize, datas: &[T], lbas: &[u64]) -> Vec<Request> {
+        assert_eq!(
+            datas.len(),
+            lbas.len(),
+            "data and lba have different lenght"
+        );
 
-        // oneshoot channel to recevie a response when I/O request has been completed
-        let (response_tx, response_rx) = oneshot::channel();
+        let mut requests = Vec::with_capacity(datas.len());
+        let mut all_ids = Vec::with_capacity(datas.len());
 
-        // Choose a Queue pair to submit I/O request
-        let q_id = (lba % internal_state.num_q_pairs as u64) as usize;
+        let mut q_pair = self.queue_pairs[q_id].lock().await;
 
-        // Send the I/O request to the tokio task managing the chosen queue pair
-        if let Some(sender) = internal_state.senders.get_mut(q_id) {
-            let r = sender.send(Some((response_tx, data, lba, true)));
-            match r {
-                Ok(_) => (),
-                Err(e) => {
-                    drop(response_rx);
-                    return Err(e.into());
-                }
+        let mut last_tail = None;
+        for (data, &lba) in datas.iter().zip(lbas.iter()) {
+            let (tail, ids) = q_pair.submit_async(data, lba, false);
+            all_ids.extend(ids);
+            if let Some(tail) = tail {
+                last_tail = Some(tail);
             }
-        } else {
-            return Err("Invalid queue id".into());
         }
-
-        Ok(tokio::spawn(async move {
-            let response = response_rx.await;
-            match response {
-                Ok(data) => data,
-                Err(e) => {
-                    panic!("Error: {}", e)
-                }
+        drop(q_pair);
+        for c_id in all_ids {
+            let (sender, receiver) = oneshot::channel();
+            {
+                let mut pending = self.pending[q_id].lock().await;
+                pending.insert(c_id, sender);
             }
-        }))
+            requests.push(Request {
+                id: c_id,
+                receiver,
+                state: crate::request::State::Submitted,
+            });
+        }
+        if let Some(tail) = last_tail {
+            self.queue_pairs[q_id].lock().await.set_tail(tail as u32);
+        }
+        requests
     }
 
-    pub async fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut internal_state = self.internal.lock().unwrap();
-
-        if !self.cleaned_up {
-            match internal_state.cleanup().await {
-                Ok(_) => self.cleaned_up = true,
-                Err(e) => eprintln!("Error during cleanup: {}", e),
+    pub async fn write(&self, q_id: usize, data: &T, lba: u64) -> Vec<Request> {
+        let mut requests = Vec::new();
+        let mut acutal_qid = q_id;
+        loop {
+            match self.submit(acutal_qid, data, lba, true).await {
+                Some((tail, ids)) => {
+                    if ids.is_empty() {
+                        println!("Empty command id list");
+                    }
+                    for &c_id in ids.iter() {
+                        let (sender, receiver) = oneshot::channel();
+                        {
+                            let mut pending = self.pending[q_id].lock().await;
+                            pending.insert(c_id, sender);
+                        }
+                        requests.push(Request {
+                            id: c_id,
+                            receiver,
+                            state: crate::request::State::Submitted,
+                        });
+                    }
+                    if let Some(tail) = tail {
+                        self.queue_pairs[acutal_qid]
+                            .lock()
+                            .await
+                            .set_tail(tail as u32);
+                    }
+                    break;
+                }
+                None => acutal_qid = (acutal_qid + 1) % self.queue_pairs.len(),
             }
-        } else {
-            println!("Cleanup already called.");
         }
+        requests
+    }
 
+    pub async fn write_batch(&self, q_id: usize, datas: &[T], lbas: &[u64]) -> Vec<Request> {
+        assert_eq!(
+            datas.len(),
+            lbas.len(),
+            "data and lba have different lenght"
+        );
+
+        let mut requests = Vec::with_capacity(datas.len());
+        let mut all_ids = Vec::with_capacity(datas.len());
+
+        let mut q_pair = self.queue_pairs[q_id].lock().await;
+
+        let mut last_tail = None;
+        for (data, &lba) in datas.iter().zip(lbas.iter()) {
+            let (tail, ids) = q_pair.submit_async(data, lba, true);
+            all_ids.extend(ids);
+            if let Some(tail) = tail {
+                last_tail = Some(tail);
+            }
+        }
+        drop(q_pair);
+        for c_id in all_ids {
+            let (sender, receiver) = oneshot::channel();
+            {
+                let mut pending = self.pending[q_id].lock().await;
+                pending.insert(c_id, sender);
+            }
+            requests.push(Request {
+                id: c_id,
+                receiver,
+                state: crate::request::State::Submitted,
+            });
+        }
+        if let Some(tail) = last_tail {
+            self.queue_pairs[q_id].lock().await.set_tail(tail as u32);
+        }
+        requests
+    }
+
+    pub async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut nvme = self.nvme.lock().await;
+        for q_pair in &self.queue_pairs {
+            let id = q_pair.lock().await.id;
+
+            nvme.submit_and_complete_admin(|c_id, _| {
+                NvmeCommand::delete_io_submission_queue(c_id, id)
+            })?;
+            nvme.submit_and_complete_admin(|c_id, _| {
+                NvmeCommand::delete_io_completion_queue(c_id, id)
+            })?;
+        }
         Ok(())
-    }
-}
-
-impl<T: DmaSlice> Drop for Driver<T> {
-    fn drop(&mut self) {
-        if !self.cleaned_up {
-            eprintln!("Warning: Driver was dropped without explicit cleanup.");
-        }
     }
 }

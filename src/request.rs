@@ -1,50 +1,71 @@
-use crate::queues::NvmeCompletion;
-use core::fmt;
+use std::fmt::Display;
+use std::task::Poll;
+use std::{future::Future, pin::Pin};
 
+use tokio::sync::oneshot;
+
+#[derive(Debug)]
 pub enum State {
     Submitted,
-    Waiting,
-    Completed(NvmeCompletion),
+    Pending,
+    Completed,
+    Error,
 }
 
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            State::Submitted => write!(f, "Submitted"),
-            State::Waiting => write!(f, "Waiting"),
-            State::Completed(_) => write!(f, "Completed"),
+            Self::Submitted => write!(f, "Submitted"),
+            Self::Pending => write!(f, "Waiting"),
+            Self::Completed => write!(f, "Completed"),
+            Self::Error => write!(f, "Error"),
         }
     }
 }
 
+#[derive(Debug)]
 pub struct Request {
+    pub id: u16,
+    pub receiver: oneshot::Receiver<std::io::Result<()>>,
     pub state: State,
-    pub c_id: u16,
-    pub r_id: usize,
 }
 
-impl Request {
-    pub fn new(c_id: u16, r_id: usize) -> Self {
-        Request {
-            state: State::Submitted,
-            c_id,
-            r_id,
-        }
-    }
+impl Request {}
 
-    pub fn complete(&mut self, completion: NvmeCompletion) {
-        self.state = State::Completed(completion);
+impl Future for Request {
+    type Output = std::io::Result<()>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(cx) {
+            Poll::Ready(Ok(result)) => {
+                self.state = State::Completed;
+                Poll::Ready(result)
+            }
+            Poll::Ready(Err(_)) => {
+                self.state = State::Error;
+                Poll::Ready(Err(std::io::Error::other(
+                    "NVMe command completion channel closed unexpectedly.",
+                )))
+            }
+            Poll::Pending => {
+                self.state = State::Pending;
+                Poll::Pending
+            }
+        }
     }
 }
 
 impl Drop for Request {
     fn drop(&mut self) {
         match self.state {
-            State::Completed(_) => {}
+            State::Completed => {}
             _ => panic!(
                 "Request dropped before completion with state {}",
                 self.state
             ),
-        };
+        }
     }
 }

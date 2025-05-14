@@ -28,6 +28,7 @@ lazy_static! {
         Mutex::new(HashMap::new());
 }
 
+#[derive(Debug)]
 pub struct Dma<T> {
     pub virt: *mut T,
     pub phys: usize,

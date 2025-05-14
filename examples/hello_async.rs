@@ -5,9 +5,17 @@ use vroom::driver::Driver;
 use vroom::memory::{Dma, DmaSlice};
 use vroom::HUGE_PAGE_SIZE;
 
+use tracing_perfetto::PerfettoLayer;
+use tracing_subscriber::prelude::*;
+
 #[tokio::main(flavor = "multi_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     //env::set_var("RUST_BACKTRACE", "1");
+
+    let layer = PerfettoLayer::new(std::sync::Mutex::new(
+        std::fs::File::create("/tmp/test.pftrace").unwrap(),
+    ));
+    tracing_subscriber::registry().with(layer).init();
 
     let mut args = env::args();
     args.next();
@@ -20,7 +28,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let mut driver = Driver::<Dma<u8>>::new(&pci_addr, 4)?;
+    let driver = Driver::<Dma<u8>>::new(&pci_addr, 4)?;
 
     let bytes = 8 * 512;
     let rand_block = &(0..HUGE_PAGE_SIZE)
@@ -31,12 +39,12 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     buffer[0..12].copy_from_slice("Hello World!".as_bytes());
 
-    let f1 = driver.write(buffer.slice(0..bytes), 0)?;
-    let _ = f1.await?;
-    let f2 = driver.read(buffer.slice(0..bytes), 0)?;
-    let result = f2.await?;
+    let f1 = driver.write(0, &buffer.slice(0..bytes), 0).await;
+    let _ = futures::future::join_all(f1).await;
+    let f2 = driver.read(0, &buffer.slice(0..bytes), 0).await;
+    let _ = futures::future::join_all(f2).await;
 
-    for b in result.chunks(2 * 4096) {
+    for b in buffer.chunks(2 * 4096) {
         for byte in b.slice.iter().take(12) {
             if let Some(char) = std::char::from_u32(*byte as u32) {
                 print!("{}", char);
@@ -45,8 +53,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         println!("");
         break;
     }
-
-    driver.cleanup().await?;
 
     Ok(())
 }
