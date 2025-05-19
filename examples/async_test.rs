@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::time::{Duration, Instant};
-use std::{env, process};
+use std::{env, mem, process};
 
 use vroom::driver::Driver;
 use vroom::memory::{Dma, DmaSlice};
@@ -16,7 +16,6 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-#[tracing::instrument]
 #[tokio::main(flavor = "multi_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     //env::set_var("RUST_BACKTRACE", "1");
@@ -99,7 +98,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             loop {
-                let mut ftrs = driver.read_batch(i, &data, &lbas).await;
+                let mut ftrs = driver.read_batch(i, &data, lbas).await;
                 if !ftrs.is_empty() {
                     op_count += ftrs.len();
                     pending.append(&mut ftrs);
@@ -113,13 +112,13 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         if op_count % (queue_num * batch_size) == 0 {
-            let drained: Vec<_> = pending.drain(..).collect();
+            let drained: Vec<_> = mem::take(&mut pending);
             let _ = futures::future::join_all(drained).await;
         }
     }
 
     if !pending.is_empty() {
-        let drained: Vec<_> = pending.drain(..).collect();
+        let drained: Vec<_> = mem::take(&mut pending);
         let _ = futures::future::join_all(drained).await;
     }
 

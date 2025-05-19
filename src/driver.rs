@@ -1,23 +1,24 @@
-use std::{collections::HashMap, error::Error, fmt::Debug, sync::Arc};
+use std::{cmp, error::Error, fmt::Debug, sync::Arc};
 
 use futures::lock::Mutex;
-use tokio::sync::oneshot::{self, Sender};
+use tokio::sync::oneshot::{self};
 
 use crate::{
-    cmd::NvmeCommand, memory::DmaSlice, pci::*, request::Request, NvmeDevice, NvmeQueuePair,
-    QUEUE_LENGTH,
+    cmd::NvmeCommand,
+    memory::DmaSlice,
+    pci::*,
+    request::{self, Request},
+    NvmeDevice, NvmeQueuePair, QUEUE_LENGTH,
 };
 
 #[derive(Debug)]
 pub struct Driver<T: DmaSlice + Debug> {
     queue_pairs: Vec<Mutex<NvmeQueuePair<T>>>,
-    pending: Vec<Mutex<HashMap<u16, Sender<std::io::Result<()>>>>>,
     nvme: Arc<Mutex<NvmeDevice<T>>>,
 }
 
 #[allow(unreachable_code)]
 impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driver<T> {
-    #[tracing::instrument]
     pub fn new(pci_addr: &str, num_q_pairs: usize) -> Result<Arc<Self>, Box<dyn Error>> {
         let mut vendor_file = pci_open_resource_ro(pci_addr, "vendor").expect("wrong pci address");
         let mut device_file = pci_open_resource_ro(pci_addr, "device").expect("wrong pci address");
@@ -46,14 +47,8 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
             queue_pairs.push(Mutex::new(nvme.create_io_queue_pair(QUEUE_LENGTH)?));
         }
 
-        let mut pending = Vec::new();
-        for _ in 0..num_q_pairs {
-            pending.push(Mutex::new(HashMap::new()));
-        }
-
         let driver = Arc::new(Driver {
             queue_pairs,
-            pending,
             nvme: Arc::new(Mutex::new(nvme)),
         });
 
@@ -62,7 +57,9 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         Ok(driver)
     }
 
-    #[tracing::instrument]
+    // Tries to submit an I/O request to a queue pair
+    // Immediately returns if lock is not obtained
+    #[inline(always)]
     async fn submit(
         &self,
         q_id: usize,
@@ -79,7 +76,6 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         None
     }
 
-    #[tracing::instrument]
     #[allow(unused_assignments)]
     fn start_polling(self: &Arc<Self>) {
         for q_id in 0..self.queue_pairs.len() {
@@ -96,13 +92,14 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
                     if !completed_ids.is_empty() {
                         empty_poll_count = 0;
 
+                        let q_pair = driver.queue_pairs[q_id].lock().await;
                         for id in completed_ids {
-                            if let Some(sender) = driver.pending[q_id].lock().await.remove(&id) {
+                            if let Some(sender) = q_pair.pending.lock().await.remove(&id) {
                                 let _ = sender.send(Ok(()));
                             }
                         }
                     } else {
-                        empty_poll_count = std::cmp::min(empty_poll_count + 1, 20);
+                        empty_poll_count = cmp::min(empty_poll_count + 1, 20);
 
                         if empty_poll_count > 10 {
                             let sleep_duration =
@@ -117,43 +114,62 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         }
     }
 
-    #[tracing::instrument]
     pub async fn read(&self, q_id: usize, data: &T, lba: u64) -> Vec<Request> {
-        let mut requests = Vec::new();
-        let mut acutal_qid = q_id;
+        let mut actual_qid = q_id;
         loop {
-            match self.submit(acutal_qid, data, lba, false).await {
+            match self.submit(actual_qid, data, lba, false).await {
                 Some((tail, ids)) => {
                     if ids.is_empty() {
                         println!("Empty command id list");
+                        return Vec::new();
                     }
-                    for &c_id in ids.iter() {
+
+                    if ids.len() == 1 {
+                        let c_id = ids[0];
                         let (sender, receiver) = oneshot::channel();
                         {
-                            let mut pending = self.pending[q_id].lock().await;
-                            pending.insert(c_id, sender);
+                            let q_pair = self.queue_pairs[actual_qid].lock().await;
+                            q_pair.pending.lock().await.insert(c_id, sender);
                         }
-                        requests.push(Request {
+                        if let Some(tail) = tail {
+                            self.queue_pairs[actual_qid]
+                                .lock()
+                                .await
+                                .set_tail(tail as u32);
+                        }
+                        return vec![Request {
                             id: c_id,
                             receiver,
-                            state: crate::request::State::Submitted,
-                        });
+                            state: request::State::Submitted,
+                        }];
+                    } else {
+                        let mut requests = Vec::with_capacity(ids.len());
+                        for &c_id in ids.iter() {
+                            let (sender, receiver) = oneshot::channel();
+                            {
+                                let q_pair = self.queue_pairs[actual_qid].lock().await;
+                                q_pair.pending.lock().await.insert(c_id, sender);
+                            }
+                            requests.push(Request {
+                                id: c_id,
+                                receiver,
+                                state: crate::request::State::Submitted,
+                            });
+                        }
+                        if let Some(tail) = tail {
+                            self.queue_pairs[actual_qid]
+                                .lock()
+                                .await
+                                .set_tail(tail as u32);
+                        }
+                        return requests;
                     }
-                    if let Some(tail) = tail {
-                        self.queue_pairs[acutal_qid]
-                            .lock()
-                            .await
-                            .set_tail(tail as u32);
-                    }
-                    break;
                 }
-                None => acutal_qid = (acutal_qid + 1) % self.queue_pairs.len(),
+                None => actual_qid = (actual_qid + 1) % self.queue_pairs.len(),
             }
         }
-        requests
     }
 
-    #[tracing::instrument]
     pub async fn read_batch(&self, q_id: usize, datas: &[T], lbas: &[u64]) -> Vec<Request> {
         assert_eq!(
             datas.len(),
@@ -178,8 +194,8 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         for c_id in all_ids {
             let (sender, receiver) = oneshot::channel();
             {
-                let mut pending = self.pending[q_id].lock().await;
-                pending.insert(c_id, sender);
+                let q_pair = self.queue_pairs[q_id].lock().await;
+                q_pair.pending.lock().await.insert(c_id, sender);
             }
             requests.push(Request {
                 id: c_id,
@@ -193,12 +209,11 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         requests
     }
 
-    #[tracing::instrument]
     pub async fn write(&self, q_id: usize, data: &T, lba: u64) -> Vec<Request> {
         let mut requests = Vec::new();
-        let mut acutal_qid = q_id;
+        let mut actual_qid = q_id;
         loop {
-            match self.submit(acutal_qid, data, lba, true).await {
+            match self.submit(actual_qid, data, lba, true).await {
                 Some((tail, ids)) => {
                     if ids.is_empty() {
                         println!("Empty command id list");
@@ -206,8 +221,8 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
                     for &c_id in ids.iter() {
                         let (sender, receiver) = oneshot::channel();
                         {
-                            let mut pending = self.pending[q_id].lock().await;
-                            pending.insert(c_id, sender);
+                            let q_pair = self.queue_pairs[actual_qid].lock().await;
+                            q_pair.pending.lock().await.insert(c_id, sender);
                         }
                         requests.push(Request {
                             id: c_id,
@@ -216,20 +231,19 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
                         });
                     }
                     if let Some(tail) = tail {
-                        self.queue_pairs[acutal_qid]
+                        self.queue_pairs[actual_qid]
                             .lock()
                             .await
                             .set_tail(tail as u32);
                     }
                     break;
                 }
-                None => acutal_qid = (acutal_qid + 1) % self.queue_pairs.len(),
+                None => actual_qid = (actual_qid + 1) % self.queue_pairs.len(),
             }
         }
         requests
     }
 
-    #[tracing::instrument]
     pub async fn write_batch(&self, q_id: usize, datas: &[T], lbas: &[u64]) -> Vec<Request> {
         assert_eq!(
             datas.len(),
@@ -254,8 +268,8 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         for c_id in all_ids {
             let (sender, receiver) = oneshot::channel();
             {
-                let mut pending = self.pending[q_id].lock().await;
-                pending.insert(c_id, sender);
+                let q_pair = self.queue_pairs[q_id].lock().await;
+                q_pair.pending.lock().await.insert(c_id, sender);
             }
             requests.push(Request {
                 id: c_id,
@@ -269,8 +283,16 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         requests
     }
 
-    #[tracing::instrument]
+    // for manual cleanup at end of program
     pub async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
+        for q_id in 0..self.queue_pairs.len() {
+            let q_pair = self.queue_pairs[q_id].lock().await;
+            let pending = q_pair.pending.lock().await;
+            if !pending.is_empty() {
+                eprintln!("Outstanding requests in queue: {}", (q_id + 1));
+            }
+        }
+
         let mut nvme = self.nvme.lock().await;
         for q_pair in &self.queue_pairs {
             let id = q_pair.lock().await.id;

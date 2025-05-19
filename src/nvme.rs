@@ -1,3 +1,6 @@
+use tokio::sync::oneshot::Sender;
+use tokio::sync::Mutex;
+
 use crate::cmd::NvmeCommand;
 use crate::memory::{Dma, DmaSlice};
 use crate::pci::pci_map_resource;
@@ -100,7 +103,7 @@ pub struct NvmeQueuePair<T: DmaSlice + Debug> {
     pub id: u16,
     pub sub_queue: NvmeSubQueue,
     comp_queue: NvmeCompQueue,
-    pub outstanding: HashMap<usize, usize>,
+    pub pending: Mutex<HashMap<u16, Sender<std::io::Result<()>>>>,
     _type: PhantomData<T>,
 }
 
@@ -198,7 +201,6 @@ impl<T: DmaSlice + Debug> NvmeQueuePair<T> {
         None
     }
 
-    #[tracing::instrument]
     pub fn submit_async(
         &mut self,
         data: &T,
@@ -243,14 +245,12 @@ impl<T: DmaSlice + Debug> NvmeQueuePair<T> {
         (last_tail, ids)
     }
 
-    #[tracing::instrument]
     pub fn set_tail(&mut self, tail: u32) {
         unsafe {
             std::ptr::write_volatile(self.sub_queue.doorbell as *mut u32, tail);
         }
     }
 
-    #[tracing::instrument]
     pub fn poll(&mut self) -> Option<u16> {
         // take completion at head from completion queue & return completion entry
         if let Some((tail, c_entry, _)) = self.comp_queue.complete() {
@@ -273,7 +273,6 @@ impl<T: DmaSlice + Debug> NvmeQueuePair<T> {
         None
     }
 
-    #[tracing::instrument]
     pub fn poll_multi(&mut self, max: usize) -> Vec<u16> {
         let mut ids = Vec::with_capacity(max);
 
@@ -350,7 +349,6 @@ unsafe impl<T: DmaSlice + Debug> Sync for NvmeDevice<T> {}
 
 #[allow(unused)]
 impl<T: DmaSlice + Debug> NvmeDevice<T> {
-    #[tracing::instrument]
     pub fn init(pci_addr: &str) -> Result<Self, Box<dyn Error>> {
         let (addr, len) = pci_map_resource(pci_addr)?;
         let mut dev = Self {
@@ -538,14 +536,12 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
             )
         })?;
 
-        let outstanding = HashMap::new();
-
         self.q_id += 1;
         Ok(NvmeQueuePair {
             id: q_id,
             sub_queue,
             comp_queue,
-            outstanding,
+            pending: Mutex::new(HashMap::new()),
             _type: PhantomData,
         })
     }

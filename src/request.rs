@@ -35,7 +35,7 @@ impl Request {}
 impl Future for Request {
     type Output = std::io::Result<()>;
 
-    #[tracing::instrument]
+    
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -60,7 +60,7 @@ impl Future for Request {
 }
 
 impl Drop for Request {
-    #[tracing::instrument]
+    
     fn drop(&mut self) {
         match self.state {
             State::Completed => {}
