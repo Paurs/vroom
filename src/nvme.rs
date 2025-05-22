@@ -379,11 +379,11 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
             dev.prp_list[i - 1] = (dev.buffer.phys + i * 4096) as u64;
         }
 
-        //println!("CAP: 0x{:x}", dev.get_reg64(NvmeRegs64::CAP as u64));
-        //println!("VS: 0x{:x}", dev.get_reg32(NvmeRegs32::VS as u32));
-        //println!("CC: 0x{:x}", dev.get_reg32(NvmeRegs32::CC as u32));
+        println!("CAP: 0x{:x}", dev.get_reg64(NvmeRegs64::CAP as u64));
+        println!("VS: 0x{:x}", dev.get_reg32(NvmeRegs32::VS as u32));
+        println!("CC: 0x{:x}", dev.get_reg32(NvmeRegs32::CC as u32));
 
-        //println!("Disabling controller");
+        println!("Disabling controller");
         // Set Enable bit to 0
         let ctrl_config = dev.get_reg32(NvmeRegs32::CC as u32) & 0xFFFF_FFFE;
         dev.set_reg32(NvmeRegs32::CC as u32, ctrl_config);
@@ -417,11 +417,11 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
         // Set Memory Page Size
         // let mpsmax = ((dev.get_reg64(NvmeRegs64::CAP as u64) >> 52) & 0xF) as u32;
         // cc |= (mpsmax << 7);
-        // println!("MPS {}", (cc >> 7) & 0xF);
+         println!("MPS {}", (cc >> 7) & 0xF);
         dev.set_reg32(NvmeRegs32::CC as u32, cc);
 
         // Enable the controller
-        //println!("Enabling controller");
+        println!("Enabling controller");
         let ctrl_config = dev.get_reg32(NvmeRegs32::CC as u32) | 1;
         dev.set_reg32(NvmeRegs32::CC as u32, ctrl_config);
 
@@ -437,12 +437,12 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
 
         let q_id = dev.q_id;
         let addr = dev.io_cq.get_addr();
-        //println!("Requesting i/o completion queue");
+        println!("Requesting i/o completion queue");
         let comp = dev.submit_and_complete_admin(|c_id, _| {
             NvmeCommand::create_io_completion_queue(c_id, q_id, addr, (QUEUE_LENGTH - 1) as u16)
         })?;
         let addr = dev.io_sq.get_addr();
-        //println!("Requesting i/o submission queue");
+        println!("Requesting i/o submission queue");
         let comp = dev.submit_and_complete_admin(|c_id, _| {
             NvmeCommand::create_io_submission_queue(
                 c_id,
@@ -464,10 +464,10 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
     }
 
     pub fn identify_controller(&mut self) -> Result<(), Box<dyn Error>> {
-        //println!("Trying to identify controller");
+        println!("Trying to identify controller");
         let _entry = self.submit_and_complete_admin(NvmeCommand::identify_controller);
 
-        //println!("Dumping identify controller");
+        println!("Dumping identify controller");
         let mut serial = String::new();
         let data = &self.buffer;
 
@@ -494,12 +494,12 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
             firmware.push(b as char);
         }
 
-        //println!(
-        //    "  - Model: {} Serial: {} Firmware: {}",
-        //    model.trim(),
-        //    serial.trim(),
-        //    firmware.trim()
-        //);
+        println!(
+            "  - Model: {} Serial: {} Firmware: {}",
+            model.trim(),
+            serial.trim(),
+            firmware.trim()
+        );
 
         Ok(())
     }
@@ -507,7 +507,7 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
     // 1 to 1 Submission/Completion Queue Mapping
     pub fn create_io_queue_pair(&mut self, len: usize) -> Result<NvmeQueuePair<T>, QueueError> {
         let q_id = self.q_id;
-        //println!("Requesting i/o queue pair with id {q_id}");
+        println!("Requesting i/o queue pair with id {q_id}");
 
         let offset = 0x1000 + ((4 << self.dstrd) * (2 * q_id + 1) as usize);
         assert!(offset <= self.len - 4, "SQ doorbell offset out of bounds");
@@ -594,7 +594,7 @@ impl<T: DmaSlice + Debug> NvmeDevice<T> {
         };
 
         // TODO: check metadata?
-        //println!("Namespace {id}, Size: {size}, Blocks: {blocks}, Block size: {block_size}");
+        println!("Namespace {id}, Size: {size}, Blocks: {blocks}, Block size: {block_size}");
 
         let namespace = NvmeNamespace {
             id,

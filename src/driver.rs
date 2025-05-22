@@ -38,7 +38,7 @@ impl<T: DmaSlice + std::marker::Sync + std::marker::Send + 'static + Debug> Driv
         nvme.identify_controller()?;
         let ns = nvme.identify_namespace_list(0);
         for n in ns {
-            //println!("ns_id: {n}");
+            println!("ns_id: {n}");
             nvme.identify_namespace(n);
         }
 

@@ -6,24 +6,10 @@ use vroom::driver::Driver;
 use vroom::memory::{Dma, DmaSlice};
 use vroom::HUGE_PAGE_SIZE;
 
-use tracing_perfetto::PerfettoLayer;
-use tracing_subscriber::prelude::*;
-
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
-    //env::set_var("RUST_BACKTRACE", "1");
 
-    let layer = PerfettoLayer::new(std::sync::Mutex::new(
-        std::fs::File::create("/tmp/test.pftrace").unwrap(),
-    ));
-    tracing_subscriber::registry().with(layer).init();
 
     let mut args = env::args();
     args.next();
@@ -71,7 +57,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     let time = duration.unwrap();
 
-    //let buffer: Dma<u8> = Dma::allocate(HUGE_PAGE_SIZE).unwrap();
 
     let buffers: Vec<Dma<u8>> = (0..queue_num)
         .map(|_| Dma::allocate(HUGE_PAGE_SIZE).unwrap())

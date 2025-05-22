@@ -5,17 +5,9 @@ use vroom::driver::Driver;
 use vroom::memory::{Dma, DmaSlice};
 use vroom::HUGE_PAGE_SIZE;
 
-use tracing_perfetto::PerfettoLayer;
-use tracing_subscriber::prelude::*;
-
 #[tokio::main(flavor = "multi_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
-    //env::set_var("RUST_BACKTRACE", "1");
 
-    let layer = PerfettoLayer::new(std::sync::Mutex::new(
-        std::fs::File::create("/tmp/test.pftrace").unwrap(),
-    ));
-    tracing_subscriber::registry().with(layer).init();
 
     let mut args = env::args();
     args.next();
